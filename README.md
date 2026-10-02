@@ -55,7 +55,24 @@ The existing `RUST_LOG` filter is respected; no default INFO or TRACE filter is 
 
 OOOSplat captures stdout/stderr, but its default filter mainly enables `cubecl_wgpu`/`burn_wgpu`. To also capture these Brush diagnostics, supply `RUST_LOG=info`, or append `brush_cli=info,brush_process=info` to the existing filter while retaining its GPU directives. This fork does not change OOOSplat's filter. Empty adapter/driver information is reported as `unknown`; total VRAM is not queried. Diagnostic summaries omit absolute export directories, but original error messages and existing logs may contain paths. These diagnostics do not fix the underlying GPU crashes reported in OOOSplat #23/#40.
 
-The [CLI diagnostics and builds workflow](https://github.com/ooolabdev/OOOBrush/actions/workflows/cli-diagnostics.yml) runs on pull requests, pushes to `main`, or manual dispatch. It tests diagnostics without a GPU and builds Windows x64, Linux x64 and macOS ARM64 artifacts containing both `brush-cli` and `brush` (with `.exe` on Windows), README, LICENSE and SHA-256 checksums. Download the platform artifact from a successful Actions run within 14 days; extract the Windows ZIP or Unix tar.gz inside it. Builds are unsigned and GPU training is not exercised on standard runners. The existing tag-based Release workflow remains separate.
+### Builds and releases (OOOBrush fork)
+
+The [CLI diagnostics, builds and releases workflow](https://github.com/ooolabdev/OOOBrush/actions/workflows/cli-diagnostics.yml) checks pull requests and pushes to `main` without publishing. It tests diagnostics without a GPU and builds Windows x64, Linux x64 and macOS ARM64 artifacts containing both `brush-cli` and `brush` (with `.exe` on Windows), README, LICENSE, `BUILDINFO.json` (source commit and actual binary versions), and internal SHA-256 checksums. Actions artifacts remain available for 14 days. Extract the Windows ZIP or Unix tar.gz inside the platform artifact. Builds are unsigned, macOS is not notarized, and hosted-runner tests do not exercise GPU training.
+
+To publish, push a fork release tag after committing the desired code:
+
+```powershell
+git tag ooo-v1.0.0
+git push origin ooo-v1.0.0
+```
+
+Alternatively, open the workflow's **Run workflow** form, choose a branch and enter the required `release_tag`, such as `ooo-v1.0.0` or `ooo-v1.0.0-rc.1`. An existing tag builds that exact tag; a new tag builds the selected branch's run commit and is created at that SHA by the publish job. These commands are examples, not a claim that this version has already been released. Tags use `ooo-vMAJOR.MINOR.PATCH`; a prerelease suffix automatically marks the Release as a prerelease.
+
+Only after checks and all three builds succeed does the workflow create a draft, upload all three packages plus an external `SHA256SUMS`, download and verify the attachments, and publish to [OOOBrush Releases](https://github.com/ooolabdev/OOOBrush/releases). A failed upload/verification leaves a draft that the same-tag, same-commit run can resume. Already public Releases are never overwritten; use a new version tag. Manual and automatic runs for the same tag share a concurrency group and do not cancel active publication. The workflow uses `GITHUB_TOKEN`, with `contents: write` only in the publish job; repository policy must permit Release creation.
+
+Merge workflow changes into `main` before publishing. GitHub can reject tag/Release creation with `GITHUB_TOKEN` when the selected commit changes workflow files relative to the default branch; such errors fail the job and leave any draft unpublished.
+
+For OOOSplat, use `brush-cli.exe` on Windows or `brush-cli` on Linux/macOS. Verify the downloaded archive against the Release's external `SHA256SUMS`; the extracted package also includes checksums for its files. The existing cargo-dist Release workflow handles other version tags and excludes `ooo-v*`. Preserve that exclusion if regenerating its workflow.
 
 ## Rerun
 
