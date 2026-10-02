@@ -12,7 +12,11 @@ use brush_process::message::TrainMessage;
 use clap::{Error, Parser, builder::ArgPredicate, error::ErrorKind};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use indicatif_log_bridge::LogWrapper;
-use std::time::Duration;
+use std::{
+    path::Path,
+    sync::OnceLock,
+    time::{Duration, Instant},
+};
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tracing::trace_span;
@@ -63,11 +67,35 @@ pub fn build_process(args: &Cli) -> Option<RunningProcess> {
     }))
 }
 
-/// Initialize the backend, then drive `process` to completion on the CLI UI.
+/// Install the CLI logger once, sharing its progress display with the UI.
+/// The caller's `RUST_LOG` filter is used unchanged.
+pub fn init_cli_logging() -> anyhow::Result<MultiProgress> {
+    static LOGGING: OnceLock<Result<MultiProgress, String>> = OnceLock::new();
+    LOGGING
+        .get_or_init(|| {
+            let logger = env_logger::Builder::from_default_env()
+                .target(env_logger::Target::Stdout)
+                .build();
+            let level = logger.filter();
+            let multi = MultiProgress::new();
+            LogWrapper::new(multi.clone(), logger)
+                .try_init()
+                .map_err(|error| format!("Failed to initialize CLI logger: {error}"))?;
+            log::set_max_level(level);
+            Ok(multi)
+        })
+        .as_ref()
+        .cloned()
+        .map_err(|error| anyhow::anyhow!("{error}"))
+}
+
+/// Initialize logging and the backend, then drive `process` to completion.
 pub async fn run_headless(
     process: RunningProcess,
     train_stream_config: TrainStreamConfig,
 ) -> Result<(), anyhow::Error> {
+    init_cli_logging()?;
+    log::info!("Brush {} (headless)", env!("CARGO_PKG_VERSION"));
     brush_process::burn_init_setup().await;
     run_cli_ui(process, train_stream_config).await
 }
@@ -78,42 +106,24 @@ pub async fn run_cli_ui(
     mut process: RunningProcess,
     train_stream_config: TrainStreamConfig,
 ) -> Result<(), anyhow::Error> {
+    let sp = init_cli_logging()?;
+    log::info!("Compute backend: {:?}", process.device);
     // Pump the trainer stream from a dedicated Actor thread; the
     // indicatif UI loop below consumes its output on the main task.
     let (tx, mut messages) = mpsc::unbounded_channel();
     let trainer = Actor::new("cli-trainer");
-    trainer
-        .run(move || async move {
-            while let Some(msg) = process.stream.next().await {
-                if tx.send(msg).is_err() {
-                    break;
-                }
+    let trainer_task = trainer.run(move || async move {
+        while let Some(msg) = process.stream.next().await {
+            let failed = msg.is_err();
+            if tx.send(msg).is_err() || failed {
+                break;
             }
-        })
-        .detach();
+        }
+    });
 
     // Hold the actor for the lifetime of the UI loop; dropping it
     // would kill the pump.
     let _trainer = trainer;
-
-    // Initialize the logger with indicatif integration to prevent
-    // progress bars from clobbering log output.
-    let sp = {
-        let mut builder = env_logger::builder();
-        builder.target(env_logger::Target::Stdout);
-        let logger = builder.build();
-        let level = logger.filter();
-        let multi = MultiProgress::new();
-
-        LogWrapper::new(multi.clone(), logger)
-            .try_init()
-            .expect("Failed to initialize logger");
-        log::set_max_level(level);
-
-        multi
-    };
-
-    log::info!("Compute backend: {:?}", process.device);
 
     let main_spinner = ProgressBar::new_spinner().with_style(
         ProgressStyle::with_template("{spinner:.blue} {msg}")
@@ -188,6 +198,10 @@ pub async fn run_cli_ui(
     #[allow(unused_mut)]
     let mut duration = Duration::from_secs(0);
     let mut eval_every = train_stream_config.process_config.eval_every;
+    let mut done_training = false;
+    let mut stream_error = None;
+    let mut progress_log = ProgressLog::default();
+    let mut total_iters = 0;
 
     while let Some(msg) = messages.recv().await {
         let _span = trace_span!("CLI UI").entered();
@@ -197,7 +211,8 @@ pub async fn run_cli_ui(
             Err(error) => {
                 // Don't print the error here. It'll bubble up and be printed as output.
                 let _ = sp.println("❌ Encountered an error");
-                return Err(error);
+                stream_error = Some(error);
+                break;
             }
         };
 
@@ -209,13 +224,17 @@ pub async fn run_cli_ui(
                 if !training {
                     // Display a big warning saying viewing splats from the CLI doesn't make sense.
                     let _ = sp.println("❌ Only training is supported in the CLI (try passing --with-viewer to view a splat)");
-                    break;
+                    anyhow::bail!(
+                        "Only training is supported in the CLI (use --with-viewer to view a splat)"
+                    );
                 }
                 main_spinner.set_message(format!("Loading {name}..."));
             }
             ProcessMessage::SplatsUpdated { .. } => {}
             ProcessMessage::TrainMessage(train) => match train {
                 TrainMessage::TrainConfig { config } => {
+                    log_train_config(&config);
+                    total_iters = config.train_config.total_iters();
                     train_progress.set_length(config.train_config.total_iters() as u64);
                     eval_every = config.process_config.eval_every;
                 }
@@ -242,6 +261,13 @@ pub async fn run_cli_ui(
                     lod_progress,
                     ..
                 } => {
+                    if progress_log.should_emit(Instant::now(), iter, total_iters, lod_progress) {
+                        log::info!(
+                            "Training progress: iteration={iter} total={total_iters} elapsed_secs={:.3} lod={}",
+                            total_elapsed.as_secs_f64(),
+                            lod_progress.map_or(0, |(lod, _)| lod),
+                        );
+                    }
                     if let Some((lod, total_lods)) = lod_progress {
                         main_spinner.set_message(format!("LOD {lod}/{total_lods}"));
                     } else {
@@ -269,7 +295,7 @@ pub async fn run_cli_ui(
                         "Eval iter {iter}: PSNR {avg_psnr}, ssim {avg_ssim}"
                     ));
                 }
-                TrainMessage::DoneTraining => {}
+                TrainMessage::DoneTraining => done_training = true,
             },
             ProcessMessage::DoneLoading => {
                 log::info!("Completed loading.");
@@ -286,6 +312,14 @@ pub async fn run_cli_ui(
         }
     }
 
+    // Await even after DoneTraining: a subsequent panic must never look like
+    // a successful run. Actor's handle preserves the original panic payload.
+    trainer_task.await;
+    if let Some(error) = stream_error {
+        return Err(error);
+    }
+    anyhow::ensure!(done_training, "Training stream closed before DoneTraining");
+
     let duration_secs = Duration::from_secs(duration.as_secs());
     let _ = sp.println(format!(
         "Training took {}",
@@ -300,10 +334,304 @@ pub async fn run_cli_ui(
     Ok(())
 }
 
+#[derive(Default)]
+struct ProgressLog {
+    last: Option<(Instant, Option<(u32, u32)>)>,
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+
+    #[test]
+    fn progress_is_throttled_except_first_last_and_lod_change() {
+        let mut progress = ProgressLog::default();
+        let now = Instant::now();
+        assert!(progress.should_emit(now, 5, 100, None));
+        assert!(!progress.should_emit(now + Duration::from_millis(900), 10, 100, None));
+        assert!(progress.should_emit(now + Duration::from_secs(1), 15, 100, None));
+        assert!(progress.should_emit(now + Duration::from_millis(1100), 20, 100, Some((1, 2))));
+        assert!(!progress.should_emit(now + Duration::from_millis(1200), 25, 100, Some((1, 2))));
+        assert!(progress.should_emit(now + Duration::from_millis(1300), 100, 100, Some((1, 2))));
+    }
+}
+
+impl ProgressLog {
+    fn should_emit(
+        &mut self,
+        now: Instant,
+        iter: u32,
+        total: u32,
+        lod: Option<(u32, u32)>,
+    ) -> bool {
+        let emit = self.last.is_none_or(|(last, previous_lod)| {
+            now.duration_since(last) >= Duration::from_secs(1) || previous_lod != lod
+        }) || iter == total;
+        if emit {
+            self.last = Some((now, lod));
+        }
+        emit
+    }
+}
+
+fn log_train_config(config: &TrainStreamConfig) {
+    let train = &config.train_config;
+    let process = &config.process_config;
+    log::info!(
+        "Training config: train_iters={} total_iters={} start_iter={} lod_levels={} lod_refine_steps={} lod_keep_pct={} lod_image_scale={} max_resolution={} max_splats={} growth_start_iter={} growth_stop_iter={} refine_every={} seed={} eval_every={}",
+        train.total_train_iters,
+        train.total_iters(),
+        process.start_iter,
+        train.lod_levels,
+        train.lod_refine_steps,
+        train.lod_decimation_keep,
+        train.lod_image_scale,
+        config.load_config.max_resolution,
+        train.max_splats,
+        train.growth_start_iter,
+        train.growth_stop_iter,
+        train.refine_every,
+        process.seed,
+        process.eval_every,
+    );
+    // Keep relative templates useful, without expanding private parent paths.
+    let export_path = if Path::new(&process.export_path).is_absolute() {
+        "<absolute directory>"
+    } else {
+        &process.export_path
+    };
+    let export_name = Path::new(&process.export_name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("unknown");
+    log::info!(
+        "Export config: every={} directory={} name={} eval_save_to_disk={} units_per_meter={}",
+        process.export_every,
+        export_path,
+        export_name,
+        process.eval_save_to_disk,
+        config.load_config.units_per_meter,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use clap::Parser;
+
+    fn probe(scenario: &str, filter: &str) -> std::process::Output {
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::diagnostic_probe", "--nocapture"])
+            .env("BRUSH_CLI_TEST_SCENARIO", scenario)
+            .env("RUST_LOG", filter)
+            .env("RUST_BACKTRACE", "1")
+            .output()
+            .expect("Run isolated CLI diagnostic probe")
+    }
+
+    #[test]
+    fn logger_initialization_and_filters() {
+        let output = probe("logging", "info");
+        assert!(output.status.success(), "{output:?}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout.matches("CLI logger ready").count(), 1);
+        assert!(!stdout.contains("CLI debug probe"));
+        assert!(!stdout.contains("CLI trace probe"));
+
+        let output = probe("logging", "error");
+        assert!(output.status.success(), "{output:?}");
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("CLI logger ready"));
+
+        let output = probe("logging", "error,brush_cli=info");
+        assert!(output.status.success(), "{output:?}");
+        assert!(String::from_utf8_lossy(&output.stdout).contains("CLI logger ready"));
+    }
+
+    #[test]
+    fn logs_final_merged_config_and_success() {
+        let output = probe("success", "info");
+        assert!(output.status.success(), "{output:?}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for field in [
+            "train_iters=17 total_iters=23 start_iter=2",
+            "lod_levels=2 lod_refine_steps=3",
+            "max_resolution=50",
+            "max_splats=321",
+            "growth_stop_iter=11",
+            "seed=7",
+            "every=9",
+            "directory=./{dataset}_exports/",
+            "Done training!",
+        ] {
+            assert!(stdout.contains(field), "Missing {field}: {stdout}");
+        }
+    }
+
+    #[test]
+    fn logs_actual_config_after_existing_merge_fallback() {
+        let output = probe("merge-fallback", "info");
+        assert!(output.status.success(), "{output:?}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("Failed to parse merged config"), "{stdout}");
+        assert!(
+            stdout.contains("train_iters=23 total_iters=23 start_iter=0 lod_levels=0"),
+            "{stdout}"
+        );
+    }
+
+    #[test]
+    fn absolute_export_directory_is_not_logged() {
+        let output = probe("absolute-path", "info");
+        assert!(output.status.success(), "{output:?}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("directory=<absolute directory>"),
+            "{stdout}"
+        );
+        assert!(!stdout.contains("private-parent"), "{stdout}");
+    }
+
+    #[test]
+    fn abnormal_streams_do_not_report_success() {
+        for scenario in [
+            "closed",
+            "error",
+            "panic",
+            "done-then-panic",
+            "done-then-error",
+            "ply",
+        ] {
+            let output = probe(scenario, "info");
+            assert!(!output.status.success(), "{scenario}: {output:?}");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(!stdout.contains("Done training!"), "{scenario}: {stdout}");
+            assert!(!stdout.contains("Training took"), "{scenario}: {stdout}");
+            if scenario.contains("panic") {
+                assert!(stderr.contains("original GPU panic probe"), "{stderr}");
+                assert!(stderr.contains("cli-trainer"), "{stderr}");
+            } else if scenario.contains("error") {
+                assert!(stderr.contains("training stage context"), "{stderr}");
+                assert!(stderr.contains("original I/O failure"), "{stderr}");
+            } else if scenario == "closed" {
+                assert!(stderr.contains("before DoneTraining"), "{stderr}");
+            } else {
+                assert!(stderr.contains("Only training is supported"), "{stderr}");
+            }
+        }
+    }
+
+    #[test]
+    fn export_warning_preserves_successful_training_and_error_chain() {
+        let output = probe("warning", "info");
+        assert!(output.status.success(), "{output:?}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("Export at iteration 9 failed: disk full"),
+            "{stdout}"
+        );
+        assert!(stdout.contains("Done training!"), "{stdout}");
+        assert!(!stdout.contains("Export succeeded"), "{stdout}");
+    }
+
+    // Invoked in a subprocess so global logging and panic behavior are tested
+    // without changing the parent test runner's environment or panic hook.
+    #[test]
+    fn diagnostic_probe() -> anyhow::Result<()> {
+        let Ok(scenario) = std::env::var("BRUSH_CLI_TEST_SCENARIO") else {
+            return Ok(());
+        };
+        init_cli_logging()?;
+        init_cli_logging()?;
+        if scenario == "logging" {
+            log::info!("CLI logger ready");
+            log::debug!("CLI debug probe");
+            log::trace!("CLI trace probe");
+            return Ok(());
+        }
+
+        let mut initial = TrainStreamConfig::default();
+        initial.train_config.total_train_iters = 17;
+        initial.train_config.lod_levels = 2;
+        initial.train_config.lod_refine_steps = 3;
+        initial.train_config.max_splats = 321;
+        initial.train_config.growth_stop_iter = 11;
+        initial.load_config.max_resolution = 50;
+        initial.process_config.start_iter = 2;
+        initial.process_config.export_every = 9;
+        let mut cli = TrainStreamConfig::default();
+        if scenario == "merge-fallback" {
+            // Preserve merge_configs' existing duplicate-argument fallback;
+            // diagnostics must describe what training actually receives.
+            cli.train_config.total_train_iters = 23;
+        }
+        cli.process_config.seed = 7;
+        let mut config = brush_process::args_file::merge_configs(&initial, &cli);
+        if scenario == "absolute-path" {
+            config.process_config.export_path = std::env::temp_dir()
+                .join("private-parent")
+                .to_string_lossy()
+                .into_owned();
+            config.process_config.export_name = std::env::temp_dir()
+                .join("private-parent")
+                .join("export_{iter}.ply")
+                .to_string_lossy()
+                .into_owned();
+        }
+        let mut items = vec![Ok(ProcessMessage::TrainMessage(
+            TrainMessage::TrainConfig {
+                config: Box::new(config),
+            },
+        ))];
+        if scenario == "ply" {
+            items.push(Ok(ProcessMessage::StartLoading {
+                name: "test.ply".into(),
+                source: DataSource::Path("test.ply".into()),
+                training: false,
+                base_path: None,
+            }));
+        }
+        if scenario == "warning" {
+            items.push(Ok(ProcessMessage::Warning {
+                error: anyhow::anyhow!("disk full").context("Export at iteration 9 failed"),
+            }));
+        }
+        if matches!(
+            scenario.as_str(),
+            "success"
+                | "merge-fallback"
+                | "absolute-path"
+                | "warning"
+                | "done-then-panic"
+                | "done-then-error"
+        ) {
+            items.push(Ok(ProcessMessage::TrainMessage(TrainMessage::DoneTraining)));
+        }
+        if matches!(scenario.as_str(), "error" | "done-then-error") {
+            items.push(Err(
+                anyhow::anyhow!("original I/O failure").context("training stage context")
+            ));
+        }
+        let stream: std::pin::Pin<Box<dyn brush_process::ProcessStream>> =
+            if scenario.contains("panic") {
+                Box::pin(
+                    tokio_stream::iter(items).chain(tokio_stream::once(()).map(|()| {
+                        panic!("original GPU panic probe");
+                    })),
+                )
+            } else {
+                Box::pin(tokio_stream::iter(items))
+            };
+        let process = RunningProcess {
+            stream,
+            splat_view: brush_process::slot::Slot::empty(),
+            device: brush_process::default_device(),
+        };
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(run_cli_ui(process, TrainStreamConfig::default()))
+    }
 
     #[test]
     fn parses_source_and_overrides() {

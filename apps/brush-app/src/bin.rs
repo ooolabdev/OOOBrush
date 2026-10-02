@@ -13,6 +13,10 @@ fn main() -> Result<(), anyhow::Error> {
 
     let args = Cli::parse().validate()?;
 
+    if !args.with_viewer {
+        brush_cli::init_cli_logging()?;
+    }
+
     #[cfg(target_family = "windows")]
     {
         use winapi::um::wincon::GetConsoleProcessList;

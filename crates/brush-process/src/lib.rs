@@ -35,7 +35,30 @@ fn burn_options() -> RuntimeOptions {
 }
 
 pub async fn burn_init_setup() -> ProcessDevice {
-    burn_wgpu::init_setup_async::<AutoGraphicsApi>(&WgpuDevice::default(), burn_options()).await;
+    let started = web_time::Instant::now();
+    log::info!("GPU initialization started");
+    // Reuse the setup returned by the existing initialization. No additional
+    // adapter/device is requested just to obtain diagnostic information.
+    let setup =
+        burn_wgpu::init_setup_async::<AutoGraphicsApi>(&WgpuDevice::default(), burn_options())
+            .await;
+    let info = setup.adapter.get_info();
+    let known = |value: String| {
+        if value.is_empty() {
+            "unknown".to_owned()
+        } else {
+            value
+        }
+    };
+    log::info!(
+        "GPU initialization completed in {:.3}s: backend={:?} device={} type={:?} driver={} driver_info={}",
+        started.elapsed().as_secs_f64(),
+        info.backend,
+        known(info.name),
+        info.device_type,
+        known(info.driver),
+        known(info.driver_info),
+    );
     default_device()
 }
 
@@ -121,7 +144,13 @@ async fn run_process<
     log::info!("Starting process with source {source:?}");
     emitter.emit(ProcessMessage::NewProcess).await;
 
-    let vfs = source.clone().into_vfs().await?;
+    let mount_started = web_time::Instant::now();
+    let vfs = source.clone().into_vfs().await.map_err(|error| {
+        Error::from(error).context(format!(
+            "Mounting data source failed after {:.3}s",
+            mount_started.elapsed().as_secs_f64()
+        ))
+    })?;
     let vfs_counts = vfs.file_count();
 
     if vfs_counts == 0 {
@@ -131,9 +160,10 @@ async fn run_process<
     let ply_count = vfs.files_with_extension("ply").count();
 
     log::info!(
-        "Mounted VFS with {} files. (plys: {})",
+        "Mounted VFS with {} files. (plys: {}) in {:.3}s",
         vfs.file_count(),
-        ply_count
+        ply_count,
+        mount_started.elapsed().as_secs_f64()
     );
 
     let is_training = vfs_counts != ply_count;

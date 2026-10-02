@@ -37,13 +37,13 @@ pub(crate) async fn train_stream(
 ) -> anyhow::Result<()> {
     log::info!("Start of training stream");
 
-    let visualize = VisualizeTools::new(train_stream_config.rerun_config.rerun_enabled).await;
-
     emitter
         .emit(ProcessMessage::TrainMessage(TrainMessage::TrainConfig {
             config: Box::new(train_stream_config.clone()),
         }))
         .await;
+
+    let visualize = VisualizeTools::new(train_stream_config.rerun_config.rerun_enabled).await;
 
     let process_config = &train_stream_config.process_config;
     log::info!("Using seed {}", process_config.seed);
@@ -52,9 +52,17 @@ pub(crate) async fn train_stream(
     let mut rng = rand::rngs::StdRng::seed_from_u64(process_config.seed);
 
     log::info!("Loading dataset");
+    let load_started = Instant::now();
     let load_result = load_dataset(vfs.clone(), &train_stream_config.load_config)
         .instrument(trace_span!("Load dataset"))
-        .await?;
+        .await
+        .with_context(|| {
+            format!(
+                "Loading dataset failed after {:.3}s",
+                load_started.elapsed().as_secs_f64()
+            )
+        })?;
+    let load_elapsed = load_started.elapsed();
 
     // Emit any warnings from dataset loading.
     for warning in load_result.warnings {
@@ -80,7 +88,7 @@ pub(crate) async fn train_stream(
         emitter.emit(ProcessMessage::Warning { error }).await;
     }
 
-    log::info!("Dataset loaded");
+    log::info!("Dataset loaded in {:.3}s", load_elapsed.as_secs_f64());
     emitter
         .emit(ProcessMessage::TrainMessage(TrainMessage::Dataset {
             dataset: dataset.clone(),
@@ -88,6 +96,7 @@ pub(crate) async fn train_stream(
         .await;
 
     log::info!("Loading initial splats if any.");
+    let init_started = Instant::now();
     let estimated_up = dataset.estimate_up();
 
     // Convert SplatData to Splats using KNN initialization
@@ -111,6 +120,15 @@ pub(crate) async fn train_stream(
                 })
                 .await;
         }
+        let method = if data.log_scales.is_none() {
+            "KNN"
+        } else {
+            "provided scales"
+        };
+        log::info!(
+            "Initial splat initialization started: {method}, {} points",
+            data.num_splats()
+        );
         let splats = to_init_splats(data, render_mode, device);
         (msg.meta.up_axis, splats)
     } else {
@@ -135,6 +153,14 @@ pub(crate) async fn train_stream(
     };
 
     let init_splats = init_splats.with_sh_degree(train_stream_config.model_config.sh_degree);
+    log::info!(
+        "Initial splats initialized in {:.3}s: {} splats",
+        init_started.elapsed().as_secs_f64(),
+        init_splats.num_splats()
+    );
+
+    let prepare_started = Instant::now();
+    log::info!("Trainer preparation started");
 
     // If the metadata has an up axis prefer that, otherwise estimate the up direction.
     let up_axis = up_axis.or(Some(estimated_up));
@@ -185,6 +211,10 @@ pub(crate) async fn train_stream(
         process_config.seed,
     );
     trainer.set_view_cams(view_cams.clone());
+    log::info!(
+        "Trainer prepared in {:.3}s",
+        prepare_started.elapsed().as_secs_f64()
+    );
 
     // Get the dataset name from the base path (if available) for interpolation.
     let dataset_name = vfs
@@ -217,6 +247,7 @@ pub(crate) async fn train_stream(
     let process_config = &train_stream_config.process_config;
 
     log::info!("Start training loop.");
+    let training_started = Instant::now();
     for iter in process_config.start_iter..train_stream_config.train_config.total_iters() {
         let target_lod = if lod_levels == 0 || iter < training_steps {
             0u32
@@ -300,6 +331,10 @@ pub(crate) async fn train_stream(
         }
 
         let step_time = Instant::now();
+        let first_step = iter == process_config.start_iter;
+        if first_step {
+            log::info!("First training step started: iteration {}", iter + 1);
+        }
 
         let batch = dataloader
             .next_batch()
@@ -313,6 +348,14 @@ pub(crate) async fn train_stream(
         let diff_splats = splats.train();
         let (new_diff_splats, stats) = trainer.step(batch, diff_splats).await;
         splats = new_diff_splats.valid();
+        if first_step {
+            // Host elapsed time only: do not synchronize the GPU for logging.
+            log::info!(
+                "First training step returned in {:.3}s: iteration {}",
+                step_time.elapsed().as_secs_f64(),
+                iter + 1
+            );
+        }
 
         // Phase-local iteration for refine gating
         let phase_iter = if current_lod == 0 {
@@ -504,6 +547,10 @@ pub(crate) async fn train_stream(
         brush_async::yield_now().await;
     }
 
+    log::info!(
+        "Training loop completed in {:.3}s (including evaluation and exports)",
+        training_started.elapsed().as_secs_f64()
+    );
     emitter
         .emit(ProcessMessage::TrainMessage(TrainMessage::DoneTraining))
         .await;
@@ -534,6 +581,105 @@ fn eval_output_path(base: &Path, iter: u32, image_path: &Path) -> anyhow::Result
 #[cfg(all(test, not(target_family = "wasm")))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn export_completion_logs_follow_io_result() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "train_stream::tests::export_probe",
+                "--nocapture",
+            ])
+            .env("BRUSH_EXPORT_TEST_PROBE", "1")
+            .output()
+            .expect("Run isolated export probe");
+        assert!(output.status.success(), "{output:?}");
+    }
+
+    #[test]
+    fn export_probe() -> anyhow::Result<()> {
+        if std::env::var_os("BRUSH_EXPORT_TEST_PROBE").is_none() {
+            return Ok(());
+        }
+        struct Capture(std::sync::Mutex<Vec<String>>);
+        impl log::Log for Capture {
+            fn enabled(&self, _: &log::Metadata<'_>) -> bool {
+                true
+            }
+            fn log(&self, record: &log::Record<'_>) {
+                self.0.lock().unwrap().push(record.args().to_string());
+            }
+            fn flush(&self) {}
+        }
+        static CAPTURE: Capture = Capture(std::sync::Mutex::new(Vec::new()));
+        log::set_logger(&CAPTURE)?;
+        log::set_max_level(log::LevelFilter::Info);
+        let root = std::env::temp_dir().join(format!("brush-export-probe-{}", std::process::id()));
+        std::fs::create_dir(&root)?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        runtime.block_on(async {
+            for name in ["export_0010.ply", "export_0010_lod1.ply"] {
+                let path = root.join(name);
+                let bytes = b"ply\nformat ascii 1.0\nend_header\n";
+                log_checkpoint_export(name, 10, async {
+                    tokio::fs::write(&path, bytes)
+                        .await
+                        .context("Writing checkpoint")
+                })
+                .await?;
+                assert_eq!(std::fs::read(&path)?, bytes);
+                std::fs::remove_file(path)?;
+            }
+            let blocked = root.join("blocked");
+            std::fs::write(&blocked, b"not a directory")?;
+            let error = log_checkpoint_export("failed.ply", 20, async {
+                tokio::fs::create_dir_all(&blocked)
+                    .await
+                    .context("Creating export directory")
+            })
+            .await
+            .unwrap_err();
+            let chain = format!("{error:#}");
+            assert!(chain.contains("Export failed after"), "{chain}");
+            assert!(chain.contains("Creating export directory"), "{chain}");
+            assert!(
+                error.chain().count() >= 3,
+                "Original I/O cause must be preserved"
+            );
+            log::warn!("{error:#}");
+            std::fs::remove_file(blocked)?;
+            Ok::<(), anyhow::Error>(())
+        })?;
+        std::fs::remove_dir(root)?;
+        let entries = CAPTURE.0.lock().unwrap();
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|line| line.contains("Export started:"))
+                .count(),
+            3
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|line| line.contains("Export succeeded"))
+                .count(),
+            2
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|line| line.contains("Export failed after") && line.contains("failed.ply"))
+        );
+        assert!(
+            !entries
+                .iter()
+                .any(|line| line.contains("Export succeeded") && line.contains("failed.ply"))
+        );
+        Ok(())
+    }
 
     #[test]
     fn eval_paths_are_safe_and_distinct() {
@@ -635,17 +781,48 @@ async fn export_checkpoint(
     up_axis: Option<glam::Vec3>,
     units_per_meter: f32,
 ) -> Result<(), anyhow::Error> {
-    tokio::fs::create_dir_all(&export_path)
-        .await
-        .with_context(|| format!("Creating export directory {}", export_path.display()))?;
     let digits = ((total_steps as f64).log10().floor() as usize) + 1;
     let export_name = export_name.replace("{iter}", &format!("{iter:0digits$}"));
-    // Training runs in metres; write the file back in the dataset's units.
-    let splat_data = brush_serde::splat_to_ply(splats.scaled(units_per_meter), up_axis)
-        .await
-        .context("Serializing splat data")?;
-    tokio::fs::write(export_path.join(&export_name), splat_data)
-        .await
-        .context(format!("Failed to export ply {export_path:?}"))?;
+    // Only the filename is added to diagnostic logs, not the resolved directory.
+    let display_name = Path::new(&export_name)
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy();
+    log_checkpoint_export(&display_name, iter, async {
+        tokio::fs::create_dir_all(&export_path)
+            .await
+            .with_context(|| format!("Creating export directory {}", export_path.display()))?;
+        // Training runs in metres; write the file back in the dataset's units.
+        let splat_data = brush_serde::splat_to_ply(splats.scaled(units_per_meter), up_axis)
+            .await
+            .context("Serializing splat data")?;
+        tokio::fs::write(export_path.join(&export_name), splat_data)
+            .await
+            .context(format!("Failed to export ply {export_path:?}"))?;
+        Ok(())
+    })
+    .await
+}
+
+// A local wrapper around the existing export operation. Failures remain
+// Warning messages at the call sites; their context includes elapsed time.
+#[cfg(not(target_family = "wasm"))]
+async fn log_checkpoint_export(
+    name: &str,
+    iter: u32,
+    export: impl std::future::Future<Output = anyhow::Result<()>>,
+) -> anyhow::Result<()> {
+    let started = Instant::now();
+    log::info!("Export started: iteration {iter}, {name}");
+    export.await.with_context(|| {
+        format!(
+            "Export failed after {:.3}s: iteration {iter}, {name}",
+            started.elapsed().as_secs_f64()
+        )
+    })?;
+    log::info!(
+        "Export succeeded in {:.3}s: iteration {iter}, {name}",
+        started.elapsed().as_secs_f64()
+    );
     Ok(())
 }

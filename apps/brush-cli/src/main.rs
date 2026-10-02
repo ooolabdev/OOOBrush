@@ -4,7 +4,7 @@
 // this is a lean build of just the training path for quick CLI iteration.
 #[cfg(not(target_family = "wasm"))]
 fn main() -> anyhow::Result<()> {
-    use brush_cli::{Cli, build_process, run_headless};
+    use brush_cli::{Cli, build_process, init_cli_logging, run_headless};
     use clap::Parser;
 
     let args = Cli::parse().validate()?;
@@ -15,6 +15,8 @@ fn main() -> anyhow::Result<()> {
              or build the `brush` binary (brush-app) for the viewer."
         );
     }
+
+    init_cli_logging()?;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

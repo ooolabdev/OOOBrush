@@ -37,6 +37,26 @@ Brush also can load .zip of splat files to display them as an animation, or a sp
 ## CLI
 Brush can be used as a CLI. Run `brush --help` to get an overview. Every CLI command can work with `--with-viewer` which also opens the UI, for easy debugging.
 
+### CLI diagnostics (OOOBrush fork)
+
+For subprocess consumers, completed training updates also produce `Training progress: iteration=… total=… elapsed_secs=… lod=…` at INFO. Output is throttled to once per second, with immediate first, LOD-change and final reports. The total includes LOD steps and uses the merged configuration. These host-side reports reuse `TrainStep`; they add no GPU synchronization or loss readback. A final step report does not establish process/export success. Consumers must still check the exit status and output file.
+
+Enable INFO logs before starting either headless binary. In PowerShell, for example:
+
+```powershell
+$env:RUST_LOG = 'info'
+$env:RUST_BACKTRACE = '1'
+.\target\release\brush-cli.exe .\dataset --total-train-iters 10
+# Alternatively, use the Brush application's headless entrypoint:
+.\target\release\brush.exe .\dataset --total-train-iters 10
+```
+
+The existing `RUST_LOG` filter is respected; no default INFO or TRACE filter is added. Logs on stdout include the Brush version, GPU initialization and actual adapter information, final settings after merging `args.txt` and CLI arguments, loading/initialization durations, the first training step, and checkpoint export results. Stage timings measure host elapsed time without adding GPU synchronization. Existing progress, splat-count and evaluation output remains available. Errors and Rust panics retain their original context and stderr output; `RUST_BACKTRACE=1` enables Rust backtraces. A missing stage completion helps locate a panic, but does not identify its GPU cause. Training completion does not imply every export succeeded: export failures remain warnings.
+
+OOOSplat captures stdout/stderr, but its default filter mainly enables `cubecl_wgpu`/`burn_wgpu`. To also capture these Brush diagnostics, supply `RUST_LOG=info`, or append `brush_cli=info,brush_process=info` to the existing filter while retaining its GPU directives. This fork does not change OOOSplat's filter. Empty adapter/driver information is reported as `unknown`; total VRAM is not queried. Diagnostic summaries omit absolute export directories, but original error messages and existing logs may contain paths. These diagnostics do not fix the underlying GPU crashes reported in OOOSplat #23/#40.
+
+The [CLI diagnostics and builds workflow](https://github.com/ooolabdev/OOOBrush/actions/workflows/cli-diagnostics.yml) runs on pull requests, pushes to `main`, or manual dispatch. It tests diagnostics without a GPU and builds Windows x64, Linux x64 and macOS ARM64 artifacts containing both `brush-cli` and `brush` (with `.exe` on Windows), README, LICENSE and SHA-256 checksums. Download the platform artifact from a successful Actions run within 14 days; extract the Windows ZIP or Unix tar.gz inside it. Builds are unsigned and GPU training is not exercised on standard runners. The existing tag-based Release workflow remains separate.
+
 ## Rerun
 
 https://github.com/user-attachments/assets/f679fec0-935d-4dd2-87e1-c301db9cdc2c
