@@ -236,16 +236,31 @@ class PublishTests(unittest.TestCase):
         self.assertIn("--prerelease=true", self.commands[-1])
         self.assertIn("--latest=false", self.commands[-1])
 
-    def test_release_list_includes_drafts_and_paginates(self):
-        draft = dict(self.draft(), tag_name=TAG)
-        pages = [io.BytesIO(json.dumps([{"tag_name": f"v0.0.{i}"} for i in range(100)]).encode()),
-                 io.BytesIO(json.dumps([draft]).encode())]
-        with patch.dict(release.os.environ, {"GH_TOKEN": "test-token"}), patch.object(release, "urlopen", side_effect=pages) as get:
-            self.assertEqual(release.read_release(REPO, TAG), draft)
-            self.assertEqual(get.call_count, 2)
-            self.assertTrue(get.call_args.args[0].full_url.endswith("page=2"))
-        with patch.dict(release.os.environ, {"GH_TOKEN": "test-token"}), patch.object(release, "urlopen", return_value=io.BytesIO(b"[]")):
+    def test_pending_tag_lookup_reads_exact_draft_id_without_listing(self):
+        # Reproduce the failed CI: the new draft exists, but list/by-tag reads
+        # are not suitable for finding it immediately after creation.
+        for is_draft in [True, False]:
+            with self.subTest(is_draft=is_draft):
+                expected = dict(self.draft(), tag_name=TAG, draft=is_draft, id=123)
+                responses = [io.BytesIO(b'{"data":{"repository":{"release":{"databaseId":123}}}}'),
+                             io.BytesIO(json.dumps(expected).encode())]
+                with patch.dict(release.os.environ, {"GH_TOKEN": "test-token"}), patch.object(release, "urlopen", side_effect=responses) as get:
+                    self.assertEqual(release.read_release(REPO, TAG), expected)
+                    lookup = get.call_args_list[0].args[0]
+                    self.assertEqual(lookup.full_url, "https://api.github.com/graphql")
+                    self.assertEqual(lookup.get_method(), "POST")
+                    self.assertEqual(json.loads(lookup.data)["variables"], {
+                        "owner": "ooolabdev", "name": "OOOBrush", "tag": TAG,
+                    })
+                    self.assertEqual(get.call_args.args[0].full_url,
+                                     f"https://api.github.com/repos/{REPO}/releases/123")
+
+    def test_missing_release_is_distinct_from_graphql_or_access_error(self):
+        with patch.dict(release.os.environ, {"GH_TOKEN": "test-token"}), patch.object(release, "urlopen", return_value=io.BytesIO(b'{"data":{"repository":{"release":null}}}')):
             self.assertIsNone(release.read_release(REPO, TAG))
+        for response in [b'{"errors":[{"message":"Access denied"}]}', b'{"data":{"repository":null}}']:
+            with self.subTest(response=response), patch.dict(release.os.environ, {"GH_TOKEN": "test-token"}), patch.object(release, "urlopen", return_value=io.BytesIO(response)), self.assertRaises(RuntimeError):
+                release.read_release(REPO, TAG)
 
     def test_api_errors_are_not_treated_as_missing_release(self):
         for code in [404, 403, 500]:

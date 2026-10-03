@@ -132,23 +132,39 @@ def validate_archives(directory, commit):
 
 
 def read_release(repo, tag):
-    # The by-tag endpoint only promises published releases. The authenticated
-    # list endpoint includes drafts and supports resuming interrupted uploads.
-    page = 1
-    while True:
-        request = Request(
-            f"https://api.github.com/repos/{repo}/releases?per_page=100&page={page}",
-            headers={"Authorization": f"Bearer {os.environ['GH_TOKEN']}",
-                     "Accept": "application/vnd.github+json", "User-Agent": "OOOBrush-release"},
-        )
-        with urlopen(request, timeout=60) as response:
-            releases = json.load(response)
-        for release in releases:
-            if release["tag_name"] == tag:
-                return release
-        if len(releases) < 100:
-            return None
-        page += 1
+    # Match gh's draft lookup: resolve the pending tag through GraphQL, then
+    # fetch that exact release ID. A list read immediately after creation can
+    # miss the new draft; the REST by-tag endpoint only promises public releases.
+    owner, name = repo.split("/", 1)
+    headers = {"Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+               "Accept": "application/vnd.github+json", "User-Agent": "OOOBrush-release",
+               "Cache-Control": "no-cache"}
+    query = {
+        "query": "query($owner: String!, $name: String!, $tag: String!) { "
+                 "repository(owner: $owner, name: $name) { "
+                 "release(tagName: $tag) { databaseId } } }",
+        "variables": {"owner": owner, "name": name, "tag": tag},
+    }
+    request = Request(
+        "https://api.github.com/graphql", data=json.dumps(query).encode("utf-8"),
+        headers=dict(headers, **{"Content-Type": "application/json"}),
+    )
+    with urlopen(request, timeout=60) as response:
+        result = json.load(response)
+    if result.get("errors"):
+        messages = "; ".join(error["message"] for error in result["errors"])
+        raise RuntimeError(f"GitHub release lookup failed: {messages}")
+    repository = result.get("data", {}).get("repository")
+    if repository is None:
+        raise RuntimeError("GitHub release repository is missing or inaccessible")
+    release = repository["release"]
+    if release is None:
+        return None
+    request = Request(
+        f"https://api.github.com/repos/{repo}/releases/{release['databaseId']}", headers=headers,
+    )
+    with urlopen(request, timeout=60) as response:
+        return json.load(response)
 
 
 def remote_tag_commit(tag):
