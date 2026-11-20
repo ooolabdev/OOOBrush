@@ -343,7 +343,8 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires a WGPU adapter"]
     async fn upload_resources_follow_frame_and_buffer_identity() {
-        let instance = wgpu::Instance::default();
+        let instance =
+            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let adapter = instance.request_adapter(&Default::default()).await.unwrap();
         let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
         let mut resources = egui_wgpu::CallbackResources::default();
