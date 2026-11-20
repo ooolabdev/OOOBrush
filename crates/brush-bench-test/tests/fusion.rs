@@ -65,6 +65,7 @@ fn test_batch(width: u32, height: u32) -> SceneBatch {
         })
         .collect();
     SceneBatch {
+        geometry: Default::default(),
         img_packed: TensorData::new(img, [height as usize, width as usize]),
         has_alpha: false,
         alpha_mode: AlphaMode::Transparent,

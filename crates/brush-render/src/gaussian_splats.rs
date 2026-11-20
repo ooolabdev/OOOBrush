@@ -32,6 +32,10 @@ pub enum RasterPass {
     Forward,
     /// Forward + backward bookkeeping (training). Hard cutoff.
     Backward,
+    /// RGBA plus expected camera-space Z, with detached compositing weights.
+    BackwardDepth,
+    /// RGBA, camera Z, and the confidence-weighted camera normal.
+    BackwardDepthNormal,
     /// Backward + C^1 smoothstep around the alpha=1/255 cutoff. Test-only:
     /// makes the analytical backward agree with finite-diff at the cutoff,
     /// at the cost of a sub-1/255 forward shift on edge pixels.
@@ -52,6 +56,10 @@ pub enum TextureMode {
     Packed,
     #[default]
     Float,
+    /// RGBA and alpha-normalized camera Z for geometry evaluation.
+    FloatDepth,
+    /// RGBA, Z, and confidence-weighted shortest-axis camera normal.
+    FloatDepthNormal,
 }
 
 /// Wrap a tensor as a trainable parameter.
@@ -425,16 +433,16 @@ pub async fn render_splats(
         SplatRenderMode::Default
     };
 
-    let use_float = matches!(texture_mode, TextureMode::Float);
     let render_device = transforms.device();
 
     // Float mode needs `Backward` (f32 image + per-splat bookkeeping); Packed
     // mode goes through the packed u8 path. Neither inference path uses the
     // smooth cutoff — that's reserved for the gradient-check tests.
-    let pass = if use_float {
-        RasterPass::Backward
-    } else {
-        RasterPass::Forward
+    let pass = match texture_mode {
+        TextureMode::Packed => RasterPass::Forward,
+        TextureMode::Float => RasterPass::Backward,
+        TextureMode::FloatDepth => RasterPass::BackwardDepth,
+        TextureMode::FloatDepthNormal => RasterPass::BackwardDepthNormal,
     };
     // Route through the `#[backend_extension]`-generated `Dispatch` impl: it
     // unwraps these dispatch primitives to the Wgpu backend, runs the render,

@@ -11,7 +11,8 @@ use crate::{
 };
 use brush_dataset::scene::SceneBatch;
 use brush_loss::{ImageLossConfig, image_loss};
-use brush_render::bwd::render_splats;
+use brush_render::bwd::render_splats_with_pass;
+use brush_render::gaussian_splats::RasterPass;
 use brush_render::gaussian_splats::Splats;
 use brush_render::{AlphaMode, bounding_box::BoundingBox, sh::sh_coeffs_for_degree};
 use burn::{
@@ -268,11 +269,24 @@ impl SplatTrainer {
             // The splats already carry their 3D-filter floor (set at refine);
             // the render path folds it in. Optimizer/refine work on raw params.
             let render_input = splats.clone();
-            let diff_out = render_splats(render_input, &camera, img_size, background)
-                .instrument(trace_span!("Forward"))
-                .await;
+            let ramp = (self.step_count.saturating_sub(500) as f32 / 500.0).min(1.0);
+            let geometry = ramp > 0.0 && batch.geometry.normals.is_some();
+            let pass = if geometry {
+                RasterPass::BackwardDepthNormal
+            } else {
+                RasterPass::Backward
+            };
+            let diff_out =
+                render_splats_with_pass(render_input, &camera, img_size, background, pass)
+                    .instrument(trace_span!("Forward"))
+                    .await;
 
-            let pred_image = diff_out.img;
+            let geometry_image = geometry.then(|| diff_out.img.clone());
+            let pred_image = if geometry {
+                diff_out.img.slice(s![.., .., 0..4])
+            } else {
+                diff_out.img
+            };
             let refine_weight_holder = diff_out.refine_weight_holder;
             let visible = diff_out.visible;
             let max_radius = diff_out.max_radius;
@@ -311,6 +325,29 @@ impl SplatTrainer {
             // compiled out on wasm — so `mut` is unused there.
             #[cfg_attr(target_family = "wasm", allow(unused_mut))]
             let mut loss = image_loss(pred_image.clone(), gt_packed.clone(), cfg);
+            if geometry {
+                loss = loss
+                    + crate::geometry::depth_distortion(splats.clone(), &camera, img_size).await
+                        * (ramp * crate::config::DEPTH_DISTORTION_WEIGHT);
+            }
+
+            if geometry && let Some((planes, channels)) = &batch.geometry.free_space {
+                loss = loss
+                    + crate::geometry::free_space_opacity(
+                        splats.clone(),
+                        &camera,
+                        img_size,
+                        *planes,
+                        channels.clone(),
+                    )
+                    .await
+                        * (ramp * crate::config::FREE_SPACE_WEIGHT);
+            }
+            if let Some(img) = geometry_image {
+                loss = loss
+                    + crate::geometry::orientation_loss(img, batch.geometry)
+                        * (crate::config::ORIENTATION_WEIGHT * ramp);
+            }
 
             // LPIPS still needs an f32 RGB tensor for VGG. Materialising it
             // here costs ~99 MB at 4K, only when LPIPS is enabled.

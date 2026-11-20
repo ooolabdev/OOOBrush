@@ -29,6 +29,21 @@ It also supports masking images:
 - A folder of images called 'masks'. This ignores parts of the image that are masked out.
   Black pixels in the mask are ignored, white pixels are kept. Pass `--invert-masks` if your masks are the other way around.
 
+### MoGe-2 geometry training
+
+On prepared datasets Brush adds Gaussian shortest-axis orientation (0.05), multi-view free-space opacity (0.02) and ray depth dispersion (0.01) to the RGB objective. Each training stage warms up for 500 steps and ramps the weights over the next 500. Depth maps supply an edge mask for orientation and a calibrated free-space cutoff. The objective omits both calibrated depth regression and relative depth correlation.
+
+Start with a complete, undistorted COLMAP PINHOLE dataset. For each registered `images/cam/view.jpg`, supply MoGe-2 relative camera-Z in `depths/cam/view.png` (16-bit grayscale, zero invalid) and camera-space normals in `normals/cam/view.png` (8-bit RGB, black invalid, axes right/down/forward). For example, using Spirula's geometry command and a MoGe-2 ONNX model with normals:
+
+```powershell
+spirula geometry .\dataset --model .\moge2-vitb-normal.onnx --depth --depth-units relative --ray-depth no --normal-format png --max-size 1064 --num-tokens 1200
+python -m pip install numpy scipy pillow
+python scripts/geometry/prepare.py .\dataset --eval-split-every 8
+brush-cli .\dataset --eval-split-every 8
+```
+
+Preparation uses the training views to write `depth-calibration.json` and the matching PNGs in `free-space/`. Use the same evaluation split in both commands, or omit it in both to train on all registered views. Use the complete registered image set for this workflow. Frame subsampling or limiting frames changes which views belong to the evaluation split. To change the split, prepare a fresh copy. Brush defaults to RGB training on ordinary datasets and enables the three losses when it finds the calibration manifest in the dataset root. Use `--geometry-supervision on` to require the prepared inputs or `--geometry-supervision off` for an RGB baseline.
+
 ## Viewer
 Brush also works well as a splat viewer, including on the web. It can load .ply & .compressed.ply files. You can stream in data from a URL (for a web app, simply append `?url=`).
 

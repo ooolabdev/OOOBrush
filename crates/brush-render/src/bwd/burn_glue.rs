@@ -54,7 +54,7 @@ mod bwd_ops {
         /// `compact_gid`: eight projected-splat gradients, then the raw opacity
         /// gradient and the refinement weight.
         #[allow(clippy::too_many_arguments)]
-        #[fusion(dtype = v_output, shape = Shape::new([projected_splats[0], 10]))]
+        #[fusion(dtype = v_output, shape = Shape::new([projected_splats[0], 6 + v_output[2]]))]
         fn rasterize_bwd(
             out_img: FloatTensor<Self>,
             projected_splats: FloatTensor<Self>,

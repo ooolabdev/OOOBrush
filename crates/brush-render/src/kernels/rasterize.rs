@@ -36,6 +36,7 @@ pub fn rasterize_kernel(
     tile_bw_div: FastDivmod<u32>,
     #[comptime] bwd_info: bool,
     #[comptime] smooth_cutoff: bool,
+    #[comptime] geometry_channels: u32,
 ) {
     let global_id = ABSOLUTE_POS as u32;
     let (pix_x, pix_y) = map_1d_to_2d(global_id, tile_bw_div);
@@ -77,6 +78,16 @@ pub fn rasterize_kernel(
     let mut pix_r = 0.0f32;
     let mut pix_g = 0.0f32;
     let mut pix_b = 0.0f32;
+    let mut geometry = Array::<f32>::new(4usize);
+    #[unroll]
+    for c in 0..geometry_channels {
+        geometry[c as usize] = 0.0f32;
+    }
+    let mut local_geometry = Shared::new_slice(comptime![if geometry_channels > 0 {
+        TILE_SIZE * geometry_channels
+    } else {
+        1u32
+    }] as usize);
     let mut done = !inside;
     let mut last_useful_isect = range_lo;
 
@@ -104,6 +115,12 @@ pub fn rasterize_kernel(
             #[unroll]
             for lane in 0..PROJECTED_LANES_USIZE {
                 local_batch[dst_base + lane] = projected[src_base + lane];
+            }
+            #[unroll]
+            for c in 0..geometry_channels {
+                local_geometry[(c * TILE_SIZE + local_idx) as usize] =
+                    projected[projected.shape(0) * (PROJECTED_LANES_USIZE + c as usize)
+                        + compact_gid as usize];
             }
             if comptime![bwd_info] {
                 load_gid[local_idx as usize] = global_from_compact_gid[compact_gid as usize];
@@ -147,6 +164,10 @@ pub fn rasterize_kernel(
                     pix_r += max(local_batch[dst_base + 6], 0.0f32) * vis;
                     pix_g += max(local_batch[dst_base + 7], 0.0f32) * vis;
                     pix_b += max(local_batch[dst_base + 8], 0.0f32) * vis;
+                    #[unroll]
+                    for c in 0..geometry_channels {
+                        geometry[c as usize] += vis * local_geometry[(c * TILE_SIZE + t) as usize];
+                    }
                     t_acc = next_t;
                     last_useful_isect = batch_start + t + 1u32;
                 }
@@ -165,11 +186,15 @@ pub fn rasterize_kernel(
         let final_b = pix_b + t_acc * u.bg_b;
         let final_a = 1.0f32 - t_acc;
         if comptime![bwd_info] {
-            let base = (pix_id * 4u32) as usize;
+            let base = (pix_id * comptime![4u32 + geometry_channels]) as usize;
             out_img_f32[base] = final_r;
             out_img_f32[base + 1] = final_g;
             out_img_f32[base + 2] = final_b;
             out_img_f32[base + 3] = final_a;
+            #[unroll]
+            for c in 0..geometry_channels {
+                out_img_f32[base + 4 + c as usize] = geometry[c as usize] / max(final_a, 1.0e-6f32);
+            }
         } else {
             let r = clamp(final_r * 255.0f32, 0.0f32, 255.0f32) as u32;
             let g = clamp(final_g * 255.0f32, 0.0f32, 255.0f32) as u32;

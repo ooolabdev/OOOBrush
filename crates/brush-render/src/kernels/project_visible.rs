@@ -2,8 +2,8 @@
 //! culled non-finite-cov2d splats so this kernel trusts `calc_cov2d`.
 
 use super::helpers::{
-    apply_scale_floor, calc_cov2d, compensate_cov2d, is_finite_f32, read_quat_unorm, read_scale,
-    sigmoid, world_to_cam, write_projected_splat,
+    PROJECTED_LANES, apply_scale_floor, calc_cov2d, compensate_cov2d, is_finite_f32, oriented_axis,
+    read_quat_unorm, read_scale, sigmoid, world_to_cam, write_projected_splat,
 };
 use super::sh::{num_sh_coeffs, sh_coeffs_to_color};
 use super::types::{ProjectUniforms, Splat, Vec3A};
@@ -33,6 +33,7 @@ pub fn project_visible_kernel(
     #[comptime] has_min_scale: bool,
     #[comptime] sh_degree: u32,
     #[comptime] camera_model: CameraModel,
+    #[comptime] geometry_channels: u32,
 ) {
     let compact_gid = ABSOLUTE_POS as u32;
     if compact_gid >= u.num_visible {
@@ -80,6 +81,20 @@ pub fn project_visible_kernel(
     let cg_c = clamp(select(is_finite_f32(cg), cg, 0.0f32), -100.0f32, 100.0f32);
     let cb_c = clamp(select(is_finite_f32(cb), cb, 0.0f32), -100.0f32, 100.0f32);
 
+    // Geometry passes append a Z plane and optionally three short-axis normal planes.
+    if comptime![geometry_channels > 0] {
+        projected[(u.num_visible * PROJECTED_LANES + compact_gid) as usize] = mean_c.z();
+    }
+    if comptime![geometry_channels == 4] {
+        let rotation = quat.to_mat3();
+        let view = u.view_rotation();
+        let axis = oriented_axis(floor.scale, rotation, view, mean_c);
+        let n = view.mul_vec3(rotation.mul_vec3(axis));
+        let start = (PROJECTED_LANES + 1u32) * u.num_visible + compact_gid;
+        projected[start as usize] = n.x();
+        projected[(start + u.num_visible) as usize] = n.y();
+        projected[(start + 2u32 * u.num_visible) as usize] = n.z();
+    }
     write_projected_splat(
         projected,
         compact_gid,

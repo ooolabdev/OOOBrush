@@ -39,6 +39,10 @@ pub struct SplatGrad {
     pub rgb_b: f32,
     pub alpha: f32,
     pub refine: f32,
+    pub z: f32,
+    pub nx: f32,
+    pub ny: f32,
+    pub nz: f32,
 }
 
 #[cube]
@@ -54,6 +58,10 @@ fn zero_grad() -> SplatGrad {
         rgb_b: 0.0f32,
         alpha: 0.0f32,
         refine: 0.0f32,
+        z: 0.0f32,
+        nx: 0.0f32,
+        ny: 0.0f32,
+        nz: 0.0f32,
     }
 }
 
@@ -107,6 +115,7 @@ pub fn rasterize_backwards_kernel<A: AtomicAddF32>(
     v_splats: &mut Tensor<Atomic<A::Storage>>,
     u: RasterizeUniforms,
     #[comptime] smooth_cutoff: bool,
+    #[comptime] geometry_channels: u32,
 ) {
     let (tile_id, tile_origin_x, tile_origin_y) = tile_origin(u.tile_bw);
     // Only `pix_state` lives in shared memory — it gets read-modify-
@@ -116,7 +125,14 @@ pub fn rasterize_backwards_kernel<A: AtomicAddF32>(
     // them inline in the inner loop. Smaller shared footprint → more
     // workgroup occupancy on Apple.
     let mut pix_state = Shared::new_slice((TILE_SIZE * 4u32) as usize);
-    load_pixel_state(output, u, tile_origin_x, tile_origin_y, &mut pix_state);
+    load_pixel_state(
+        output,
+        u,
+        tile_origin_x,
+        tile_origin_y,
+        &mut pix_state,
+        geometry_channels,
+    );
     let (range_lo, range_hi) = load_range(tile_offsets, tile_id);
     let num_splats_in_tile = range_hi - range_lo;
     let rounds = (num_splats_in_tile + SPLAT_BATCH - 1u32) / SPLAT_BATCH;
@@ -142,9 +158,10 @@ pub fn rasterize_backwards_kernel<A: AtomicAddF32>(
             v_output,
             u,
             smooth_cutoff,
+            geometry_channels,
         );
         if splat_active {
-            let base = (compact_gid * 10u32) as usize;
+            let base = (compact_gid * comptime![10u32 + geometry_channels]) as usize;
             A::add(&v_splats[base], grad.xy_x);
             A::add(&v_splats[base + 1], grad.xy_y);
             A::add(&v_splats[base + 2], grad.conic_x);
@@ -155,6 +172,14 @@ pub fn rasterize_backwards_kernel<A: AtomicAddF32>(
             A::add(&v_splats[base + 7], grad.rgb_b);
             A::add(&v_splats[base + 8], grad.alpha);
             A::add(&v_splats[base + 9], grad.refine);
+            if comptime![geometry_channels > 0] {
+                A::add(&v_splats[base + 10], grad.z);
+                if comptime![geometry_channels == 4] {
+                    A::add(&v_splats[base + 11], grad.nx);
+                    A::add(&v_splats[base + 12], grad.ny);
+                    A::add(&v_splats[base + 13], grad.nz);
+                }
+            }
         }
         batch_idx += 1u32;
     }
@@ -194,6 +219,7 @@ fn load_pixel_state(
     tile_origin_x: u32,
     tile_origin_y: u32,
     pix_state: &mut Shared<[f32]>,
+    #[comptime] geometry_channels: u32,
 ) {
     let pixels_per_load = (TILE_SIZE + SPLAT_BATCH - 1u32) / SPLAT_BATCH;
     let mut p = 0u32;
@@ -206,7 +232,7 @@ fn load_pixel_state(
             let s = (pix_rank * 4u32) as usize;
             if inside {
                 let pix_id = pix_x + pix_y * u.img_w;
-                let base = (pix_id * 4u32) as usize;
+                let base = (pix_id * comptime![4u32 + geometry_channels]) as usize;
                 let final_r = output[base];
                 let final_g = output[base + 1];
                 let final_b = output[base + 2];
@@ -261,6 +287,7 @@ fn accumulate_grads_for_batch(
     v_output: &Tensor<f32>,
     u: RasterizeUniforms,
     #[comptime] smooth_cutoff: bool,
+    #[comptime] geometry_channels: u32,
 ) -> SplatGrad {
     let conic = Sym2 {
         c00: splat.conic_x,
@@ -320,12 +347,21 @@ fn accumulate_grads_for_batch(
                         // loads for ~5 KiB of shared memory back, which
                         // recovers an Apple-GPU occupancy slot.
                         let pix_id = pix_x + pix_y * u.img_w;
-                        let pix_base = (pix_id * 4u32) as usize;
+                        let pix_base = (pix_id * comptime![4u32 + geometry_channels]) as usize;
                         let v_o_x = v_output[pix_base];
                         let v_o_y = v_output[pix_base + 1];
                         let v_o_z = v_output[pix_base + 2];
                         let v_a = v_output[pix_base + 3];
                         let final_a = output[pix_base + 3];
+                        if comptime![geometry_channels > 0] {
+                            let w = vis / max(final_a, 1e-6f32);
+                            grad.z += w * v_output[pix_base + 4];
+                            if comptime![geometry_channels == 4] {
+                                grad.nx += w * v_output[pix_base + 5];
+                                grad.ny += w * v_output[pix_base + 6];
+                                grad.nz += w * v_output[pix_base + 7];
+                            }
+                        }
                         let t_final = 1.0f32 - final_a;
                         let v_o_w =
                             (v_a - (u.bg_r * v_o_x + u.bg_g * v_o_y + u.bg_b * v_o_z)) * t_final;

@@ -73,7 +73,54 @@ pub(crate) async fn train_stream(
             .await;
     }
 
-    let dataset = load_result.dataset;
+    let mut dataset = load_result.dataset;
+    let manifest = std::path::Path::new("depth-calibration.json");
+    use crate::config::GeometrySupervision;
+    let geometry = match process_config.geometry_supervision {
+        GeometrySupervision::Auto => vfs.iter_files().any(|p| p == manifest),
+        GeometrySupervision::On => true,
+        GeometrySupervision::Off => false,
+    };
+    if geometry {
+        use tokio::io::AsyncReadExt;
+        let mut bytes = Vec::new();
+        vfs.reader_at_path(manifest)
+            .await
+            .context("opening depth-calibration.json")?
+            .read_to_end(&mut bytes)
+            .await?;
+        let calibration: std::collections::HashMap<String, brush_dataset::scene::DepthCalibration> =
+            serde_json::from_slice(&bytes).context("parsing depth-calibration.json")?;
+        let files = vfs.file_paths().collect();
+        for view in Arc::make_mut(&mut dataset.train.views) {
+            anyhow::ensure!(
+                view.camera.camera_model
+                    == brush_render::kernels::camera_model::CameraModel::Pinhole,
+                "geometry supervision requires undistorted pinhole views"
+            );
+            view.image.enable_geometry(&files, true, true, true)?;
+            let key = view.image.path().to_string_lossy().replace('\\', "/");
+            let mut value = *calibration
+                .get(&key)
+                .with_context(|| format!("missing depth calibration for {key}"))?;
+            value.scale /= train_stream_config.load_config.units_per_meter;
+            anyhow::ensure!(
+                value.scale.is_finite()
+                    && value.scale > 0.0
+                    && (0.0..=1.0).contains(&value.confidence),
+                "invalid depth calibration for {key}"
+            );
+            view.image.depth_calibration = Some(value);
+        }
+        log::info!(
+            "Geometry supervision: orientation={} free_space={} depth_distortion={} calibrated_depth=0 relative_depth=0 warmup=500 ramp=500",
+            brush_train::config::ORIENTATION_WEIGHT,
+            brush_train::config::FREE_SPACE_WEIGHT,
+            brush_train::config::DEPTH_DISTORTION_WEIGHT
+        );
+    } else {
+        log::info!("Geometry supervision off; using RGB training");
+    }
 
     log::info!("Log scene to rerun");
     if let Err(error) = visualize.log_scene(
@@ -339,7 +386,7 @@ pub(crate) async fn train_stream(
         let batch = dataloader
             .next_batch()
             .instrument(trace_span!("Wait for next data batch"))
-            .await;
+            .await?;
 
         // Lift splats onto the autodiff graph for this step, run training,
         // then strip back to inner so the viewer slot sees plain splats.

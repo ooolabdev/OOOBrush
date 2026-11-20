@@ -38,7 +38,12 @@ impl SplatBwdOps for CubeBackend {
         let client = projected_splats.client.clone();
 
         // Sparse [num_visible, 10] indexed by compact_gid.
-        let v_combined = Self::float_zeros([num_visible, 10].into(), &device, FloatDType::F32);
+        let geometry_channels = out_img.shape()[2] - 4;
+        let v_combined = Self::float_zeros(
+            [num_visible, 10 + geometry_channels].into(),
+            &device,
+            FloatDType::F32,
+        );
 
         let tile_bounds = uvec2(
             img_size.x.div_ceil(crate::shaders::helpers::TILE_WIDTH),
@@ -78,6 +83,7 @@ impl SplatBwdOps for CubeBackend {
                     v_combined.clone().into_tensor_arg(),
                     uniforms,
                     smooth_cutoff,
+                    geometry_channels as u32,
                 );
             } else {
                 rasterize_backwards_kernel::launch::<CasAtomicAdd>(
@@ -92,6 +98,7 @@ impl SplatBwdOps for CubeBackend {
                     v_combined.clone().into_tensor_arg(),
                     uniforms,
                     smooth_cutoff,
+                    geometry_channels as u32,
                 );
             }
         });
@@ -127,6 +134,7 @@ impl SplatBwdOps for CubeBackend {
 
         // Compact outputs with the zero row in front (see the kernel); the
         // kernel writes every row, so no fill.
+        let geometry_channels = v_combined.shape()[1] - 10;
         let rows = project_uniforms.num_visible as usize + 1;
         let coeffs = sh_coeffs_for_degree(project_uniforms.sh_degree) as usize;
         let v_transforms = create_tensor([rows, 10], &device, DType::F32);
@@ -157,6 +165,7 @@ impl SplatBwdOps for CubeBackend {
                 has_min_scale,
                 project_uniforms.sh_degree,
                 project_uniforms.camera_model,
+                geometry_channels as u32,
             );
         });
 

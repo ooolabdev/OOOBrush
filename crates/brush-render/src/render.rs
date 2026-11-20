@@ -202,8 +202,16 @@ impl SplatOps for CubeBackend {
         let compact_counts = Self::int_gather(0, intersect_counts, global_from_compact_gid.clone());
         let cum_tiles_hit =
             tracing::trace_span!("PrefixSumGaussHits").in_scope(|| prefix_sum(compact_counts));
+        let geometry_channels = match pass {
+            RasterPass::BackwardDepth => 1usize,
+            RasterPass::BackwardDepthNormal => 4,
+            _ => 0,
+        };
         let projected_splats = create_tensor(
-            [num_visible_sz, kernels::helpers::PROJECTED_LANES_USIZE],
+            [
+                num_visible_sz,
+                kernels::helpers::PROJECTED_LANES_USIZE + geometry_channels,
+            ],
             &device,
             DType::F32,
         );
@@ -226,6 +234,7 @@ impl SplatOps for CubeBackend {
                 has_min_scale,
                 sh_degree,
                 camera.camera_model,
+                geometry_channels as u32,
             );
         });
         let num_tiles = tile_bounds.x * tile_bounds.y;
@@ -271,7 +280,7 @@ impl SplatOps for CubeBackend {
                 tile_offsets.clone().into_tensor_arg(),
             );
         });
-        let out_dim = if bwd_info { 4 } else { 1 };
+        let out_dim = if bwd_info { 4 + geometry_channels } else { 1 };
         let out_img = create_tensor(
             [img_size.y as usize, img_size.x as usize, out_dim],
             &device,
@@ -323,6 +332,7 @@ impl SplatOps for CubeBackend {
                 project_uniforms.tile_bounds[0],
                 bwd_info,
                 smooth_cutoff,
+                geometry_channels as u32,
             );
         });
         RenderOutput {

@@ -7,6 +7,7 @@ pub mod msg;
 pub mod train;
 
 mod adam_scaled;
+mod geometry;
 mod multinomial;
 mod quat_vec;
 mod stats;

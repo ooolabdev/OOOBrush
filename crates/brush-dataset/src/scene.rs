@@ -139,6 +139,7 @@ fn pack_rgba(img: &image::RgbaImage, premultiply: bool) -> Vec<i32> {
 pub struct SceneBatch {
     /// `[H, W]` u32, each entry packs `[r g b a]` u8.
     pub img_packed: TensorData,
+    pub geometry: GeometryMaps,
     /// True when the source image had an alpha channel that the trainer
     /// should consume (mask weight, alpha-matching loss, bg compositing).
     pub has_alpha: bool,
@@ -146,14 +147,37 @@ pub struct SceneBatch {
     pub camera: Camera,
 }
 
+/// Supervise one pixel per 4x4 block. Each target is sampled at the same RGB pixel centre.
+pub const GEOMETRY_STRIDE: usize = 4;
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize)]
+pub struct DepthCalibration {
+    pub scale: f32,
+    pub confidence: f32,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct GeometryMaps {
+    pub depth: Option<TensorData>,
+    pub normals: Option<TensorData>,
+    /// Three conservative camera-Z cutoffs and the per-pixel channel (1..=3, 0 skips).
+    pub free_space: Option<([f32; 3], TensorData)>,
+}
+
 impl SceneBatch {
     /// Host bytes the packed image occupies.
     pub fn packed_bytes(&self) -> u64 {
-        self.img_packed
-            .as_bytes()
-            .len()
-            .try_into()
-            .expect("shouldn't exceed ~18 Exabytes...")
+        std::iter::once(&self.img_packed)
+            .chain(self.geometry.depth.iter())
+            .chain(self.geometry.normals.iter())
+            .chain(
+                self.geometry
+                    .free_space
+                    .iter()
+                    .map(|(_, channels)| channels),
+            )
+            .map(|v| v.as_bytes().len() as u64)
+            .sum()
     }
 
     pub fn img_size(&self) -> [usize; 2] {

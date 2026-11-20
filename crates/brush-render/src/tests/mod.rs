@@ -283,6 +283,135 @@ async fn render_scene(
     read_finite(output).await
 }
 
+// Two centred gaussians with alpha 1/2 contribute 1/2 and 1/4.
+#[wasm_bindgen_test(unsupported = tokio::test)]
+async fn depth_weights_move_centres_without_changing_opacity() {
+    use crate::bwd::render_splats_with_pass;
+    use crate::gaussian_splats::RasterPass;
+    use burn::module::Module;
+    let device: burn::tensor::Device = brush_cube::test_helpers::test_device().await.into();
+    let cam = Camera::new(
+        Vec3::ZERO,
+        glam::Quat::IDENTITY,
+        1.0,
+        1.0,
+        glam::vec2(0.5, 0.5),
+        CameraModel::Pinhole,
+    );
+    let scene = Scene {
+        means: vec![[0., 0., 2.], [0., 0., 4.]],
+        quats: vec![[1., 0., 0., 0.]; 2],
+        log_scales: vec![[-1.; 3]; 2],
+        sh_dc: vec![[0.; 3]; 2],
+        raw_opacity: vec![0.; 2],
+    };
+    let splats = scene_to_splats(&scene, &device).train();
+    let out = render_splats_with_pass(
+        splats.clone(),
+        &cam,
+        glam::uvec2(33, 33),
+        Vec3::ZERO,
+        RasterPass::BackwardDepth,
+    )
+    .await;
+    let z = out.img.slice([16..17, 16..17, 4..5]).sum();
+    let sample = z.clone().inner().into_scalar_async::<f32>().await.unwrap();
+    assert!((sample - 8.0 / 3.0).abs() < 1e-4, "depth {sample}");
+    let mut grads = z.backward();
+    let grad = splats
+        .transforms
+        .val()
+        .grad_remove(&mut grads)
+        .unwrap()
+        .into_data_async()
+        .await
+        .unwrap()
+        .try_into_vec::<f32>()
+        .unwrap();
+    assert!(
+        (grad[2] - 2.0 / 3.0).abs() < 1e-4 && (grad[12] - 1.0 / 3.0).abs() < 1e-4,
+        "{grad:?}"
+    );
+    let opacity = splats
+        .raw_opacities
+        .val()
+        .grad_remove(&mut grads)
+        .unwrap()
+        .into_data_async()
+        .await
+        .unwrap()
+        .try_into_vec::<f32>()
+        .unwrap();
+    assert_eq!(opacity, vec![0.0; 2]);
+}
+
+#[wasm_bindgen_test(unsupported = tokio::test)]
+async fn shortest_axis_normal_only_rotates_anisotropic_splats() {
+    use crate::{bwd::render_splats_with_pass, gaussian_splats::RasterPass};
+    use burn::module::Module;
+    let device = brush_cube::test_helpers::test_device().await.into();
+    let cam = Camera::new(
+        Vec3::ZERO,
+        glam::Quat::IDENTITY,
+        1.,
+        1.,
+        glam::vec2(0.5, 0.5),
+        CameraModel::Pinhole,
+    );
+    let theta = 0.4f32;
+    let (s, c) = (theta * 0.5).sin_cos();
+    for (z_scale, confidence) in [(-3.0, 1.0), (-1.0, 0.0)] {
+        let scene = Scene {
+            means: vec![[0., 0., 2.]],
+            quats: vec![[c, 0., s, 0.]],
+            log_scales: vec![[-1., -1., z_scale]],
+            sh_dc: vec![[0.; 3]],
+            raw_opacity: vec![0.],
+        };
+        let splats = scene_to_splats(&scene, &device).train();
+        let out = render_splats_with_pass(
+            splats.clone(),
+            &cam,
+            glam::uvec2(33, 33),
+            Vec3::ZERO,
+            RasterPass::BackwardDepthNormal,
+        )
+        .await;
+        let nx = out.img.slice([16..17, 16..17, 5..6]).sum();
+        let x = nx.clone().inner().into_scalar_async::<f32>().await.unwrap();
+        assert!((x + confidence * theta.sin()).abs() < 1e-4, "normal x {x}");
+        let mut grads = nx.backward();
+        let g = splats
+            .transforms
+            .val()
+            .grad_remove(&mut grads)
+            .unwrap()
+            .into_data_async()
+            .await
+            .unwrap()
+            .try_into_vec::<f32>()
+            .unwrap();
+        let dtheta = (-s * g[3] + c * g[5]) * 0.5;
+        assert!(
+            (dtheta + confidence * theta.cos()).abs() < 1e-4,
+            "rotation derivative {dtheta}"
+        );
+        assert_eq!(&g[..3], &[0.; 3]);
+        assert_eq!(&g[7..], &[0.; 3]);
+        assert_eq!(
+            splats
+                .raw_opacities
+                .val()
+                .grad_remove(&mut grads)
+                .unwrap()
+                .into_scalar_async::<f32>()
+                .await
+                .unwrap(),
+            0.
+        );
+    }
+}
+
 // Same scene rendered twice must produce bit-identical output.
 #[wasm_bindgen_test(unsupported = tokio::test)]
 async fn render_is_deterministic_on_large_splats() {

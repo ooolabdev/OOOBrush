@@ -8,7 +8,7 @@ use burn::cubecl::cube;
 use burn::cubecl::prelude::*;
 use burn::cubecl::std::FastDivmod;
 
-use super::types::{PixelRect, ProjectUniforms, Quat, Splat, Sym2, TileBbox, Vec3A};
+use super::types::{Mat3, PixelRect, ProjectUniforms, Quat, Splat, Sym2, TileBbox, Vec3A};
 use crate::kernels::camera_model::{CameraModel, calculate_project_jacobian};
 pub use brush_cube::{calc_sigma, is_finite_f32, sigmoid};
 
@@ -22,6 +22,28 @@ pub const TILE_SIZE: u32 = TILE_WIDTH * TILE_WIDTH;
 /// hard-step path.
 pub const ALPHA_CUTOFF_MID: f32 = 1.0 / 255.0;
 pub const ALPHA_CUTOFF_BAND: f32 = 1.0e-3;
+
+/// Shortest local axis with a frozen sign and anisotropy confidence.
+#[cube]
+pub fn oriented_axis(scale: Vec3A, rotation: Mat3, view: Mat3, centre: Vec3A) -> Vec3A {
+    let x = scale.x();
+    let y = scale.y();
+    let z = scale.z();
+    let smallest = min(x, min(y, z));
+    let middle = max(min(x, y), min(max(x, y), z));
+    let confidence = clamp(
+        2.0f32 * (1.0f32 - smallest / max(middle, 1e-12f32)),
+        0.0f32,
+        1.0f32,
+    );
+    let axis = Vec3A::new(
+        select(x <= y && x <= z, 1.0f32, 0.0f32),
+        select(y < x && y <= z, 1.0f32, 0.0f32),
+        select(z < x && z < y, 1.0f32, 0.0f32),
+    );
+    let away = view.mul_vec3(rotation.mul_vec3(axis)).dot(centre) > 0.0f32;
+    axis.scale(select(away, -confidence, confidence))
+}
 
 #[cube]
 pub fn alpha_cutoff_weight(alpha: f32) -> f32 {

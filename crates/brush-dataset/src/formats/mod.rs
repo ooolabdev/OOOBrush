@@ -171,7 +171,12 @@ fn scale_to_meters(
 /// are skipped so an image never resolves to its own mask.
 fn find_image_by_name<'a>(vfs: &'a BrushVfs, name: &str) -> Option<&'a Path> {
     vfs.files_ending_in(name)
-        .filter(|p| !p.iter().any(|f| f == "masks"))
+        .filter(|p| {
+            !p.iter().any(|f| f == "masks")
+                && !["normals", "depths", "free-space"]
+                    .iter()
+                    .any(|dir| p.starts_with(dir))
+        })
         .min()
 }
 
@@ -248,6 +253,25 @@ mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
     use wasm_bindgen_test::wasm_bindgen_test;
+
+    #[wasm_bindgen_test(unsupported = test)]
+    fn png_geometry_sidecars_do_not_replace_colmap_images() {
+        let vfs = BrushVfs::create_test_vfs(vec![
+            PathBuf::from("images/stone.png"),
+            PathBuf::from("free-space/stone.png"),
+            PathBuf::from("depths/stone.png"),
+            PathBuf::from("normals/stone.png"),
+            PathBuf::from("images/normals/frame.png"),
+        ]);
+        assert_eq!(
+            find_image_by_name(&vfs, "stone.png"),
+            Some(Path::new("images/stone.png"))
+        );
+        assert_eq!(
+            find_image_by_name(&vfs, "normals/frame.png"),
+            Some(Path::new("images/normals/frame.png"))
+        );
+    }
 
     #[wasm_bindgen_test(unsupported = test)]
     fn test_find_mask() {

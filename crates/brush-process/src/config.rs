@@ -1,9 +1,27 @@
 use clap::{Args, Parser};
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Copy, Default, clap::ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GeometrySupervision {
+    #[default]
+    Auto,
+    On,
+    Off,
+}
+
 #[derive(Clone, Args, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct ProcessConfig {
+    /// Enable the three geometry losses. Auto detects depth-calibration.json in the dataset root.
+    #[arg(
+        long,
+        value_enum,
+        default_value = "auto",
+        help_heading = "Training options"
+    )]
+    #[serde(default)]
+    pub geometry_supervision: GeometrySupervision,
     /// Random seed.
     #[arg(long, help_heading = "Process options", default_value = "42")]
     pub seed: u64,

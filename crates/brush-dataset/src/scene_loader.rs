@@ -57,7 +57,7 @@ impl BatchCache {
 }
 
 pub struct SceneLoader {
-    rx: mpsc::Receiver<SceneBatch>,
+    rx: mpsc::Receiver<std::io::Result<SceneBatch>>,
     // Owns the loader actor threads. Dropping cancels them; their
     // senders then drop, the channel closes, and `next_batch` returns.
     _actors: Vec<Actor>,
@@ -110,18 +110,18 @@ impl SceneLoader {
         }
     }
 
-    pub async fn next_batch(&mut self) -> SceneBatch {
+    pub async fn next_batch(&mut self) -> std::io::Result<SceneBatch> {
         self.rx
             .recv()
             .await
-            .expect("Scene loader channel closed unexpectedly")
+            .ok_or_else(|| std::io::Error::other("Scene loader channel closed unexpectedly"))?
     }
 }
 
 async fn run_loader(
     views: Arc<Vec<crate::scene::SceneView>>,
     cache: Arc<Mutex<BatchCache>>,
-    tx: mpsc::Sender<SceneBatch>,
+    tx: mpsc::Sender<std::io::Result<SceneBatch>>,
     seed: u64,
 ) {
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
@@ -147,9 +147,17 @@ async fn run_loader(
                 .load()
                 .await
                 .expect("Scene loader failed to load an image");
+            let geometry = match view.image.load_geometry(raw.width(), raw.height()).await {
+                Ok(maps) => maps,
+                Err(e) => {
+                    let _ = tx.send(Err(e)).await;
+                    return;
+                }
+            };
             let (img_packed, has_alpha) = view_to_packed_data(raw, view.image.alpha_mode());
             let mut batch = SceneBatch {
                 img_packed,
+                geometry,
                 has_alpha,
                 alpha_mode: view.image.alpha_mode(),
                 camera: view.camera,
@@ -160,12 +168,18 @@ async fn run_loader(
                 // Share the pixels before caching: this hand-off and every
                 // later hit then costs a refcount instead of a full copy.
                 batch.img_packed = share_packed(batch.img_packed);
+                batch.geometry.depth = batch.geometry.depth.map(share_packed);
+                batch.geometry.normals = batch.geometry.normals.map(share_packed);
+                batch.geometry.free_space = batch
+                    .geometry
+                    .free_space
+                    .map(|(planes, channels)| (planes, share_packed(channels)));
                 cache.insert(index, Arc::new(batch.clone()));
             }
             batch
         };
 
-        if tx.send(batch).await.is_err() {
+        if tx.send(Ok(batch)).await.is_err() {
             break;
         }
         brush_async::yield_now().await;

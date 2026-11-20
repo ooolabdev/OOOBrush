@@ -2,6 +2,11 @@ use brush_render::gaussian_splats::SplatRenderMode;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
+/// Weights for the MoGe-2 geometry objective after warm-up.
+pub const ORIENTATION_WEIGHT: f32 = 0.05;
+pub const FREE_SPACE_WEIGHT: f32 = 0.02;
+pub const DEPTH_DISTORTION_WEIGHT: f32 = 0.01;
+
 #[derive(Clone, Parser, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct TrainConfig {

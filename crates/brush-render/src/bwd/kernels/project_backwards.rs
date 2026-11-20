@@ -3,7 +3,8 @@
 use crate::kernels::camera_model::CameraModel;
 use crate::kernels::camera_model::{calculate_project_jacobian, calculate_projection_vjp};
 use crate::kernels::helpers::{
-    apply_scale_floor, calc_cov2d, compensate_cov2d, read_quat_unorm, read_scale, world_to_cam,
+    apply_scale_floor, calc_cov2d, compensate_cov2d, oriented_axis, read_quat_unorm, read_scale,
+    world_to_cam,
 };
 use crate::kernels::sh::{num_sh_coeffs, sh_coeffs_to_color_vjp, sh_color_viewdir_vjp};
 use crate::kernels::types::{Mat3, ProjectUniforms, Quat, Sym2, Vec3A};
@@ -139,6 +140,7 @@ pub fn project_backwards_kernel(
     #[comptime] has_min_scale: bool,
     #[comptime] sh_degree: u32,
     #[comptime] camera_model: CameraModel,
+    #[comptime] geometry_channels: u32,
 ) {
     let row = ABSOLUTE_POS as u32;
     if row > u.num_visible {
@@ -160,7 +162,7 @@ pub fn project_backwards_kernel(
 
     // Read upstream rasterize grads first. rasterize_bwd only writes for
     // splats that contributed to a pixel; the rest write their zero row.
-    let rg_base = (compact_gid * 10u32) as usize;
+    let rg_base = (compact_gid * comptime![10u32 + geometry_channels]) as usize;
     let v_mean2d_x = v_rasterize_grads[rg_base];
     let v_mean2d_y = v_rasterize_grads[rg_base + 1];
     let v_conics_x = v_rasterize_grads[rg_base + 2];
@@ -172,7 +174,21 @@ pub fn project_backwards_kernel(
     let v_alpha_in = v_rasterize_grads[rg_base + 8];
     let v_refine_in = v_rasterize_grads[rg_base + 9];
 
-    let any_grad = v_mean2d_x != 0.0f32
+    let mut vz = 0.0f32;
+    if comptime![geometry_channels > 0] {
+        vz = v_rasterize_grads[rg_base + 10];
+    }
+    let mut vn = Vec3A::new(0.0f32, 0.0f32, 0.0f32);
+    if comptime![geometry_channels == 4] {
+        vn = Vec3A::new(
+            v_rasterize_grads[rg_base + 11],
+            v_rasterize_grads[rg_base + 12],
+            v_rasterize_grads[rg_base + 13],
+        );
+    }
+    let any_grad = vn.dot(vn) > 0.0f32
+        || vz != 0.0f32
+        || v_mean2d_x != 0.0f32
         || v_mean2d_y != 0.0f32
         || v_conics_x != 0.0f32
         || v_conics_y != 0.0f32
@@ -275,6 +291,11 @@ pub fn project_backwards_kernel(
     // v_covar_c = J^T * v_cov2d * J (2x2 sym → 3x3 sym).
     let vcc = cam_jac.transpose_congruence_sym2(v_cov2d);
 
+    let v_mean_c = if comptime![geometry_channels > 0] {
+        v_mean_c.add(Vec3A::new(0.0f32, 0.0f32, vz))
+    } else {
+        v_mean_c
+    };
     let v_mean = view_rot.transpose_mul_vec3(v_mean_c).add(v_mean_from_sh);
 
     // v_covar = R^T * v_covar_c * R (symmetric).
@@ -298,7 +319,19 @@ pub fn project_backwards_kernel(
 
     // grad for quat from covar: v_quat = normalize_vjp(quat) *
     // quat_to_mat_vjp(quat, v_M * diag(scale)).
-    let q_grad = quat_to_mat_vjp(quat, v_m.mul_diag(scale));
+    let v_r = v_m.mul_diag(scale);
+    let v_r = if comptime![geometry_channels == 4] {
+        let axis = oriented_axis(scale, r, view_rot, mean_c);
+        let g = view_rot.transpose_mul_vec3(vn);
+        Mat3::from_cols(
+            v_r.col0().add(g.scale(axis.x())),
+            v_r.col1().add(g.scale(axis.y())),
+            v_r.col2().add(g.scale(axis.z())),
+        )
+    } else {
+        v_r
+    };
+    let q_grad = quat_to_mat_vjp(quat, v_r);
     let v_q = apply_normalize_vjp(quat_unorm, q_grad);
 
     // Write gradients to the compact row.
