@@ -25,6 +25,7 @@ members = [
     "crates/rrfd",
 ]
 default-members = ["apps/brush-app"]
+exclude = ["vendor/cubecl-environment"]
 
 [workspace.package]
 edition = "2024"
@@ -77,7 +78,6 @@ clap = { version = "4.5.23", features = ["derive"] }
 parse-size = "1.1"
 
 web-time = "1.1.0"
-humantime = "2.1.0"
 async-fn-stream = "0.3"
 assert_approx_eq = "1.1.0"
 safetensors = "0.8"
@@ -333,3 +333,7 @@ wgpu-core            = { git = "https://github.com/ArthurBrussee/wgpu", branch =
 wgpu-hal             = { git = "https://github.com/ArthurBrussee/wgpu", branch = "fix/webgpu-errors-v30.0.1" }
 wgpu-types           = { git = "https://github.com/ArthurBrussee/wgpu", branch = "fix/webgpu-errors-v30.0.1" }
 naga                 = { git = "https://github.com/ArthurBrussee/wgpu", branch = "fix/webgpu-errors-v30.0.1" }
+
+# Keep the pinned CubeCL APIs and use a patched bundled SQLite for its cache.
+[patch."https://github.com/tracel-ai/cubecl"]
+cubecl-environment = { path = "vendor/cubecl-environment" }

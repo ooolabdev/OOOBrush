@@ -1,0 +1,100 @@
+# CubeCL environment at 467522442c7b68f02c7ff0c84b2e249e36d8da91. See README.md.
+
+[package]
+authors = ["Dilshod Tadjibaev (@antimora)", "Nathaniel Simard (@nathanielsimard)"]
+categories = ["science", "mathematics", "algorithms"]
+description = "Environment compatibility layer for CubeCL: sync primitives, futures, streams, config and persistence across std, no-std, wasm and tokio"
+edition = "2024"
+keywords = ["gpu", "cuda", "wgpu"]
+license = "MIT OR Apache-2.0"
+name = "cubecl-environment"
+readme = "README.md"
+repository = "https://github.com/tracel-ai/cubecl/tree/main/crates/cubecl-environment"
+version = "0.11.0-pre.4"
+rust-version = "1.95"
+publish = false
+
+[features]
+# Zero-copy `Bytes` backed by the `bytes` crate.
+shared-bytes = ["dep:bytes"]
+browser-cache = [
+    "dep:web-sys",
+    "dep:js-sys",
+    "dep:wasm-bindgen",
+    "oneshot/async",
+]
+# The `SQLite` persistence backend. `rusqlite` is a non-wasm dependency, so on
+# wasm this feature enables nothing; use `browser-cache` there instead.
+cache = [
+    "std",
+    "dep:rusqlite",
+]
+default = ["std"]
+std = [
+    "rand/std",
+    "rand/thread_rng",
+    "serde_json/std",
+    "ciborium/std",
+    "dep:futures-lite",
+    "dep:parking_lot",
+    "dep:backtrace",
+    # `CacheConfig` resolves a cache root whenever there is a file system,
+    # independently of which persistence backend is compiled in.
+    "dep:etcetera",
+    "oneshot/std",
+    "async-channel/std",
+    "dep:toml",
+]
+tokio = ["std", "dep:tokio"]
+tracing = ["dep:tracing"]
+
+[dependencies]
+log = { default-features = false, version = "^0.4.22" }
+tracing = { version = "^0.1.43", default-features = false, optional = true, features = ["attributes"] }
+bytemuck = { version = "1.16.1", features = ["derive"] }
+cfg-if = { version = "1.0.0" }
+foldhash = { version = "0.2", default-features = false }
+hashbrown = { version = "0.17" }
+rand = { version = "0.10.0", default-features = false, features = ["std_rng"] }
+serde = { version = "1.0.204", default-features = false, features = ["derive", "alloc"] }
+serde_bytes = { version = "0.11.17", default-features = false, features = ["alloc"] }
+bytes = { version = "1.10", default-features = false, optional = true }
+ciborium = { version = "0.2.2", default-features = false }
+serde_json = { version = "1.0.119", default-features = false, features = ["alloc"] }
+toml = { version = "1", optional = true }
+async-channel = { version = "2.3", default-features = false }
+embassy-futures = { version = "0.1.1" }
+futures-lite = { version = "2.3.0", default-features = false, optional = true, features = ["std"] }
+backtrace = { version = "0.3", default-features = false, optional = true, features = ["std"] }
+parking_lot = { version = "0.12.5", default-features = false, optional = true }
+
+[build-dependencies]
+cfg_aliases = { version = "0.2.2" }
+
+[target.'cfg(target_has_atomic = "ptr")'.dependencies]
+oneshot = { version = "0.2.1", default-features = false }
+spin = { version = "0.12.2", features = ["mutex", "spin_mutex", "lazylock"] }
+
+[target.'cfg(not(target_has_atomic = "ptr"))'.dependencies]
+bytes = { version = "1.10", default-features = false, optional = true, features = ["extra-platforms"] }
+async-channel = { version = "2.3", default-features = false, features = ["portable-atomic"] }
+portable-atomic = { version = "1.14", default-features = false, features = ["serde", "fallback"] }
+portable-atomic-util = { version = "0.2.4", features = ["alloc"] }
+spin = { version = "0.12.2", features = ["mutex", "spin_mutex", "lazylock", "portable_atomic"] }
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+etcetera = { version = "0.11.0", optional = true }
+rusqlite = { version = "0.41.1", features = ["bundled"], optional = true }
+tokio = { version = "^1.53.1", default-features = false, optional = true, features = ["rt"] }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+js-sys = { version = "0.3", optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-futures = { version = "0.4.45" }
+web-sys = { version = "0.3", optional = true, features = ["DomException", "DomStringList", "Event", "EventTarget", "IdbDatabase", "IdbFactory", "IdbKeyRange", "IdbObjectStore", "IdbOpenDbRequest", "IdbRequest", "IdbTransaction", "IdbTransactionMode"] }
+
+[target.'cfg(not(target_os = "none"))'.dependencies]
+web-time = { version = "1.1.0" }
+
+[target.'cfg(target_os = "none")'.dependencies]
+embassy-time = { version = "0.5", default-features = false }

@@ -54,7 +54,6 @@ wgpu.workspace = true
 brush-async.path = "../../crates/brush-async"
 async-channel.workspace = true
 web-time.workspace = true
-humantime.workspace = true
 wasm-bindgen.workspace = true
 bytemuck = { version = "1.14", features = ["derive"] }
 

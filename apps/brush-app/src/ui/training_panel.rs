@@ -178,13 +178,12 @@ impl AppPane for TrainingPanel {
         {
             let remaining_iters = tc.train_config.total_iters().saturating_sub(iter);
             let remaining_secs = (remaining_iters as f32 / self.train_iter_per_s) as u64;
-            let remaining = Duration::from_secs(remaining_secs);
+            let remaining = brush_process::format_duration(remaining_secs);
 
             ui.label(
                 RichText::new(format!(
-                    "{:.0} it/s  ETA {}",
-                    self.train_iter_per_s,
-                    humantime::format_duration(remaining)
+                    "{:.0} it/s  ETA {remaining}",
+                    self.train_iter_per_s
                 ))
                 .size(12.0)
                 .color(text_color),
@@ -195,14 +194,11 @@ impl AppPane for TrainingPanel {
         // Show training elapsed time
         if let Some((elapsed, _)) = self.last_train_step {
             // Truncate to seconds for human-friendly display
-            let elapsed_secs = Duration::from_secs(elapsed.as_secs());
+            let elapsed = brush_process::format_duration(elapsed.as_secs());
             ui.label(
-                RichText::new(format!(
-                    "{} elapsed",
-                    humantime::format_duration(elapsed_secs)
-                ))
-                .size(12.0)
-                .color(text_color),
+                RichText::new(format!("{elapsed} elapsed"))
+                    .size(12.0)
+                    .color(text_color),
             );
             ui.add_space(4.0);
         }

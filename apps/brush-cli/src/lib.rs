@@ -320,16 +320,9 @@ pub async fn run_cli_ui(
     }
     anyhow::ensure!(done_training, "Training stream closed before DoneTraining");
 
-    let duration_secs = Duration::from_secs(duration.as_secs());
-    let _ = sp.println(format!(
-        "Training took {}",
-        humantime::format_duration(duration_secs)
-    ));
-
-    log::info!(
-        "Done training! Took {:?}.",
-        humantime::format_duration(duration_secs)
-    );
+    let elapsed = brush_process::format_duration(duration.as_secs());
+    let _ = sp.println(format!("Training took {elapsed}"));
+    log::info!("Done training! Took {elapsed}.");
 
     Ok(())
 }

@@ -177,12 +177,8 @@ impl AppPane for StatsPanel {
                 ui.separator();
 
                 let last_eval = self.last_eval.clone().unwrap_or_else(|| "--".to_owned());
-                let training_time = format!(
-                    "{}",
-                    humantime::format_duration(Duration::from_secs(
-                        self.last_train_step.0.as_secs()
-                    ))
-                );
+                let training_time =
+                    brush_process::format_duration(self.last_train_step.0.as_secs());
                 let train_step = self.last_train_step.1;
                 let (train_views, eval_views) = self.train_eval_views;
 

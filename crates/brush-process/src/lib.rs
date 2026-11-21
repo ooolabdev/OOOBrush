@@ -7,6 +7,20 @@ pub mod train_stream;
 pub use brush_vfs::DataSource;
 pub type ProcessDevice = burn::tensor::Device;
 
+/// Format whole seconds for training summaries and progress displays.
+pub fn format_duration(total_seconds: u64) -> String {
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds / 60) % 60;
+    let seconds = total_seconds % 60;
+    if hours > 0 {
+        format!("{hours}h {minutes:02}m {seconds:02}s")
+    } else if minutes > 0 {
+        format!("{minutes}m {seconds:02}s")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
 pub fn default_device() -> ProcessDevice {
     WgpuDevice::default().into()
 }

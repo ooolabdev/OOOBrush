@@ -20,7 +20,6 @@ clap.workspace = true
 tracing.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
-humantime.workspace = true
 log.workspace = true
 env_logger.workspace = true
 anyhow.workspace = true
