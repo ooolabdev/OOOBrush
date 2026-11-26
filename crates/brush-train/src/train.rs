@@ -3,6 +3,7 @@ use std::f32::consts::FRAC_1_SQRT_2;
 use crate::{
     adam_scaled::{AdamScaled, AdamState},
     config::{GeometryLossWeights, TrainConfig},
+    geometry::GeometryStep,
     msg::{RefineStats, TrainStepStats},
     multinomial::multinomial_sample,
     quat_vec::quaternion_vec_multiply,
@@ -12,7 +13,6 @@ use crate::{
 use brush_dataset::scene::SceneBatch;
 use brush_loss::{ImageLossConfig, image_loss};
 use brush_render::bwd::render_splats_with_pass;
-use brush_render::gaussian_splats::RasterPass;
 use brush_render::gaussian_splats::Splats;
 use brush_render::{AlphaMode, bounding_box::BoundingBox, sh::sh_coeffs_for_degree};
 use burn::{
@@ -279,37 +279,19 @@ impl SplatTrainer {
             // The splats already carry their 3D-filter floor (set at refine);
             // the render path folds it in. Optimizer/refine work on raw params.
             let render_input = splats.clone();
-            let weights = self
-                .geometry_weights
-                .unwrap_or_else(|| {
-                    if batch.geometry.normals.is_some() {
-                        GeometryLossWeights::standard()
-                    } else {
-                        GeometryLossWeights::default()
-                    }
-                })
-                .for_step(
-                    self.step_count,
-                    batch.geometry.normals.is_some() && batch.geometry.depth.is_some(),
-                    batch.geometry.free_space.is_some(),
-                );
-            let orientation = weights.orientation > 0.0;
-            let pass = if orientation {
-                RasterPass::BackwardDepthNormal
-            } else {
-                RasterPass::Backward
-            };
-            let diff_out =
-                render_splats_with_pass(render_input, &camera, img_size, background, pass)
-                    .instrument(trace_span!("Forward"))
-                    .await;
+            let geometry =
+                GeometryStep::new(self.geometry_weights, self.step_count, &batch.geometry);
+            let diff_out = render_splats_with_pass(
+                render_input,
+                &camera,
+                img_size,
+                background,
+                geometry.raster_pass(),
+            )
+            .instrument(trace_span!("Forward"))
+            .await;
 
-            let geometry_image = orientation.then(|| diff_out.img.clone());
-            let pred_image = if orientation {
-                diff_out.img.slice(s![.., .., 0..4])
-            } else {
-                diff_out.img
-            };
+            let (pred_image, geometry_image) = geometry.split_render(diff_out.img);
             let refine_weight_holder = diff_out.refine_weight_holder;
             let visible = diff_out.visible;
             let max_radius = diff_out.max_radius;
@@ -347,31 +329,16 @@ impl SplatTrainer {
             // `loss` is only reassigned by the LPIPS path below, which is
             // compiled out on wasm — so `mut` is unused there.
             #[cfg_attr(target_family = "wasm", allow(unused_mut))]
-            let mut loss = image_loss(pred_image.clone(), gt_packed.clone(), cfg);
-            if weights.depth_distortion > 0.0 {
-                loss = loss
-                    + crate::geometry::depth_distortion(splats.clone(), &camera, img_size).await
-                        * weights.depth_distortion;
-            }
-
-            if weights.free_space > 0.0
-                && let Some((planes, channels)) = &batch.geometry.free_space
-            {
-                loss = loss
-                    + crate::geometry::free_space_opacity(
-                        splats.clone(),
-                        &camera,
-                        img_size,
-                        *planes,
-                        channels.clone(),
-                    )
-                    .await
-                        * weights.free_space;
-            }
-            if let Some(img) = geometry_image {
-                loss = loss
-                    + crate::geometry::orientation_loss(img, batch.geometry) * weights.orientation;
-            }
+            let mut loss = geometry
+                .add_losses(
+                    image_loss(pred_image.clone(), gt_packed.clone(), cfg),
+                    &splats,
+                    &camera,
+                    img_size,
+                    geometry_image,
+                    batch.geometry,
+                )
+                .await;
 
             // LPIPS still needs an f32 RGB tensor for VGG. Materialising it
             // here costs ~99 MB at 4K, only when LPIPS is enabled.

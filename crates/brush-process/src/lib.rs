@@ -1,5 +1,7 @@
 pub mod args_file;
 pub mod config;
+mod geometry_inputs;
+mod geometry_options;
 pub mod message;
 pub mod slot;
 pub mod train_stream;
