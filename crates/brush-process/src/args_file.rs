@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use brush_vfs::BrushVfs;
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser};
 use tokio::io::AsyncReadExt;
 
 use crate::config::TrainStreamConfig;
@@ -55,6 +55,7 @@ pub fn config_to_args(config: &TrainStreamConfig) -> Vec<String> {
 
     let config_json = serde_json::to_value(config).unwrap_or(Value::Null);
     let default_json = serde_json::to_value(TrainStreamConfig::default()).unwrap_or(Value::Null);
+    let command = TrainStreamConfig::command();
 
     let mut args = Vec::new();
 
@@ -74,8 +75,15 @@ pub fn config_to_args(config: &TrainStreamConfig) -> Vec<String> {
             let arg_name = format!("--{key}");
             match value {
                 Value::Bool(b) => {
-                    // For booleans, only output flag if true (and different from default)
-                    if b {
+                    // Explicit true/false options (e.g. geometry switches)
+                    // must keep their value. Ordinary presence-only flags keep
+                    // their existing representation.
+                    if command.get_arguments().any(|arg| {
+                        arg.get_long() == Some(key.as_str())
+                            && matches!(arg.get_action(), clap::ArgAction::Set)
+                    }) {
+                        args.push(format!("{arg_name} {b}"));
+                    } else if b {
                         args.push(arg_name);
                     }
                 }
@@ -127,8 +135,13 @@ pub fn merge_configs(
         all_args.extend(arg.split_whitespace().map(|s| s.to_owned()));
     }
 
-    // Parse the combined arguments
-    match TrainStreamConfig::try_parse_from(&all_args) {
+    // Later explicit CLI values override the same option from args.txt;
+    // otherwise clap rejects duplicates and the unrelated file options are lost.
+    let merged = TrainStreamConfig::command()
+        .args_override_self(true)
+        .try_get_matches_from(&all_args)
+        .and_then(|matches| TrainStreamConfig::from_arg_matches(&matches));
+    match merged {
         Ok(config) => config,
         Err(e) => {
             log::warn!("Failed to parse merged config: {e}");

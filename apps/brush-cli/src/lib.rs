@@ -461,15 +461,26 @@ mod tests {
     }
 
     #[test]
-    fn logs_actual_config_after_existing_merge_fallback() {
-        let output = probe("merge-fallback", "info");
+    fn logs_cli_override_without_losing_other_file_settings() {
+        let output = probe("merge-override", "info");
         assert!(output.status.success(), "{output:?}");
         let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("Failed to parse merged config"), "{stdout}");
         assert!(
-            stdout.contains("train_iters=23 total_iters=23 start_iter=0 lod_levels=0"),
+            !stdout.contains("Failed to parse merged config"),
             "{stdout}"
         );
+        for field in [
+            "train_iters=23 total_iters=29 start_iter=2",
+            "lod_levels=2 lod_refine_steps=3",
+            "max_resolution=50",
+            "max_splats=321",
+            "growth_stop_iter=11",
+            "seed=7",
+            "every=9",
+            "Done training!",
+        ] {
+            assert!(stdout.contains(field), "Missing {field}: {stdout}");
+        }
     }
 
     #[test]
@@ -553,9 +564,8 @@ mod tests {
         initial.process_config.start_iter = 2;
         initial.process_config.export_every = 9;
         let mut cli = TrainStreamConfig::default();
-        if scenario == "merge-fallback" {
-            // Preserve merge_configs' existing duplicate-argument fallback;
-            // diagnostics must describe what training actually receives.
+        if scenario == "merge-override" {
+            // A CLI override must not discard unrelated args.txt values.
             cli.train_config.total_train_iters = 23;
         }
         cli.process_config.seed = 7;
@@ -592,7 +602,7 @@ mod tests {
         if matches!(
             scenario.as_str(),
             "success"
-                | "merge-fallback"
+                | "merge-override"
                 | "absolute-path"
                 | "warning"
                 | "done-then-panic"
