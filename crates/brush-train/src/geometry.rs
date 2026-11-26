@@ -104,7 +104,7 @@ impl GeometryStep {
     }
 
     /// Preserve exactly the previous accumulation order: RGB, dispersion,
-    /// free-space opacity, orientation. LPIPS and optimizer work stay in train.rs.
+    /// free-space opacity, orientation. LPIPS and optimizer work stay in `train.rs`.
     pub(crate) async fn add_losses(
         &self,
         mut loss: Tensor<1>,

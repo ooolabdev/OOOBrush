@@ -38,7 +38,7 @@ pub(crate) async fn prepare_for_training(
 
 /// Load only the supervision inputs needed by the resolved losses. In
 /// particular, depth dispersion is a render-only loss and must not activate
-/// the MoGe file loader just to make the trainer's geometry branch reachable.
+/// the `MoGe` file loader just to make the trainer's geometry branch reachable.
 async fn prepare_geometry_inputs(
     vfs: &BrushVfs,
     scene: &mut Scene,

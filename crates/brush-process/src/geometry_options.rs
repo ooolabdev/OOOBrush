@@ -1,4 +1,4 @@
-//! OOOBrush geometry CLI options and effective loss resolution.
+//! Fork-specific geometry CLI options and effective loss resolution.
 
 use brush_train::config::{
     DEPTH_DISTORTION_WEIGHT, FREE_SPACE_WEIGHT, GeometryLossWeights, ORIENTATION_WEIGHT,
@@ -18,7 +18,7 @@ pub enum GeometrySupervision {
 #[derive(Clone, Default, Args, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct GeometryOptions {
-    /// Default for the three geometry losses. Auto detects depth-calibration.json; Off disables all three.
+    /// Default for the three geometry losses. `Auto` detects `depth-calibration.json`; `Off` disables all three.
     #[arg(
         long,
         value_enum,
@@ -67,7 +67,7 @@ fn parse_geometry_weight(value: &str) -> Result<f32, String> {
 
 impl GeometryOptions {
     /// Resolve each loss independently. A weight alone does not enable a loss;
-    /// the explicit switch overrides Auto/On, and the master Off always wins.
+    /// the explicit switch overrides `Auto`/`On`, and the master `Off` always wins.
     pub fn resolve(&self, prepared: bool) -> anyhow::Result<GeometryLossWeights> {
         let default_enabled = match self.geometry_supervision {
             GeometrySupervision::Auto => prepared,

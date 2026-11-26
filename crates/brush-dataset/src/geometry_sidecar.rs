@@ -1,7 +1,7 @@
 //! MoGe-2 sidecar path selection, decoding and training target preparation.
 //!
-//! This is a child module of load_image so its existing private file handles
-//! remain private. RGB/mask loading and the public LoadImage API do not change.
+//! This is a child module of `load_image` so its existing private file handles
+//! remain private. RGB/mask loading and the public `LoadImage` API do not change.
 
 use std::{io, path::PathBuf};
 

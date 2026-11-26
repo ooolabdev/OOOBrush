@@ -7,7 +7,7 @@ pub use crate::geometry_options::{GeometryOptions, GeometrySupervision};
 #[derive(Clone, Args, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct ProcessConfig {
-    /// OOOBrush geometry options keep their original flat CLI and JSON names.
+    /// Fork geometry options keep their original flat CLI and JSON names.
     #[clap(flatten)]
     #[serde(flatten)]
     pub geometry: GeometryOptions,
