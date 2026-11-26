@@ -63,6 +63,8 @@ brush-cli.exe .\dataset --geometry-supervision on `
 
 These are experimental overrides, not new defaults. A false switch or zero weight skips the corresponding loss and its additional rendering work. Setting a weight does not by itself enable a loss. To train with only depth dispersion on an ordinary undistorted PINHOLE dataset, use `--geometry-depth-distortion true`; no MoGe maps or calibration manifest are needed with the other losses left off in `auto`. Orientation alone does not require calibrated free-space files, and free-space alone does not require loading normals. Geometry training retains the existing PINHOLE camera requirement. The effective loss weights are reported in the INFO log after the final configuration is resolved. All six options also work in `args.txt`, with explicitly supplied CLI values taking precedence.
 
+For fork development, see [upstream maintenance and geometry regression testing](docs/upstream-maintenance.md). The geometry implementation is kept in focused modules, with a reproducible local GPU smoke test for the CLI switches, sidecars, and final exports.
+
 ## Viewer
 Brush also works well as a splat viewer, including on the web. It can load .ply & .compressed.ply files. You can stream in data from a URL (for a web app, simply append `?url=`).
 
