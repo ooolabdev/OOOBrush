@@ -2,7 +2,7 @@ use std::f32::consts::FRAC_1_SQRT_2;
 
 use crate::{
     adam_scaled::{AdamScaled, AdamState},
-    config::TrainConfig,
+    config::{GeometryLossWeights, TrainConfig},
     msg::{RefineStats, TrainStepStats},
     multinomial::multinomial_sample,
     quat_vec::quaternion_vec_multiply,
@@ -68,6 +68,7 @@ fn step_param<const D: usize>(
 
 pub struct SplatTrainer {
     config: TrainConfig,
+    geometry_weights: Option<GeometryLossWeights>,
     /// Per-step multiplier of the exponential mean-LR schedule:
     /// `lr(n) = lr_mean * decay^(n-1)`.
     lr_mean_decay: f64,
@@ -185,6 +186,7 @@ impl SplatTrainer {
 
         Self {
             config,
+            geometry_weights: None,
             lr_mean_decay: decay,
             lr_scaling_fixed,
             lr_mean_columns,
@@ -210,6 +212,14 @@ impl SplatTrainer {
     /// the Mip-Splatting 3D filter (gated on `config.min_scale_factor > 0`).
     pub fn set_view_cams(&mut self, view_cams: Vec<(glam::Vec3, f32)>) {
         self.view_cams = view_cams;
+    }
+
+    /// The process resolves switches once for the actual dataset, and supplies
+    /// the same effective weights to every training/LOD phase. Low-level
+    /// callers which do not supply weights retain the old map-driven default.
+    pub fn with_geometry_weights(mut self, weights: GeometryLossWeights) -> Self {
+        self.geometry_weights = Some(weights);
+        self
     }
 
     pub async fn step(&mut self, batch: SceneBatch, splats: Splats) -> (Splats, TrainStepStats) {
@@ -269,9 +279,22 @@ impl SplatTrainer {
             // The splats already carry their 3D-filter floor (set at refine);
             // the render path folds it in. Optimizer/refine work on raw params.
             let render_input = splats.clone();
-            let ramp = (self.step_count.saturating_sub(500) as f32 / 500.0).min(1.0);
-            let geometry = ramp > 0.0 && batch.geometry.normals.is_some();
-            let pass = if geometry {
+            let weights = self
+                .geometry_weights
+                .unwrap_or_else(|| {
+                    if batch.geometry.normals.is_some() {
+                        GeometryLossWeights::standard()
+                    } else {
+                        GeometryLossWeights::default()
+                    }
+                })
+                .for_step(
+                    self.step_count,
+                    batch.geometry.normals.is_some() && batch.geometry.depth.is_some(),
+                    batch.geometry.free_space.is_some(),
+                );
+            let orientation = weights.orientation > 0.0;
+            let pass = if orientation {
                 RasterPass::BackwardDepthNormal
             } else {
                 RasterPass::Backward
@@ -281,8 +304,8 @@ impl SplatTrainer {
                     .instrument(trace_span!("Forward"))
                     .await;
 
-            let geometry_image = geometry.then(|| diff_out.img.clone());
-            let pred_image = if geometry {
+            let geometry_image = orientation.then(|| diff_out.img.clone());
+            let pred_image = if orientation {
                 diff_out.img.slice(s![.., .., 0..4])
             } else {
                 diff_out.img
@@ -325,13 +348,15 @@ impl SplatTrainer {
             // compiled out on wasm — so `mut` is unused there.
             #[cfg_attr(target_family = "wasm", allow(unused_mut))]
             let mut loss = image_loss(pred_image.clone(), gt_packed.clone(), cfg);
-            if geometry {
+            if weights.depth_distortion > 0.0 {
                 loss = loss
                     + crate::geometry::depth_distortion(splats.clone(), &camera, img_size).await
-                        * (ramp * crate::config::DEPTH_DISTORTION_WEIGHT);
+                        * weights.depth_distortion;
             }
 
-            if geometry && let Some((planes, channels)) = &batch.geometry.free_space {
+            if weights.free_space > 0.0
+                && let Some((planes, channels)) = &batch.geometry.free_space
+            {
                 loss = loss
                     + crate::geometry::free_space_opacity(
                         splats.clone(),
@@ -341,12 +366,11 @@ impl SplatTrainer {
                         channels.clone(),
                     )
                     .await
-                        * (ramp * crate::config::FREE_SPACE_WEIGHT);
+                        * weights.free_space;
             }
             if let Some(img) = geometry_image {
                 loss = loss
-                    + crate::geometry::orientation_loss(img, batch.geometry)
-                        * (crate::config::ORIENTATION_WEIGHT * ramp);
+                    + crate::geometry::orientation_loss(img, batch.geometry) * weights.orientation;
             }
 
             // LPIPS still needs an f32 RGB tensor for VGG. Materialising it

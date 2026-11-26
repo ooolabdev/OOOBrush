@@ -42,7 +42,26 @@ python scripts/geometry/prepare.py .\dataset --eval-split-every 8
 brush-cli .\dataset --eval-split-every 8
 ```
 
-Preparation uses the training views to write `depth-calibration.json` and the matching PNGs in `free-space/`. Use the same evaluation split in both commands, or omit it in both to train on all registered views. Use the complete registered image set for this workflow. Frame subsampling or limiting frames changes which views belong to the evaluation split. To change the split, prepare a fresh copy. Brush defaults to RGB training on ordinary datasets and enables the three losses when it finds the calibration manifest in the dataset root. Use `--geometry-supervision on` to require the prepared inputs or `--geometry-supervision off` for an RGB baseline.
+Preparation uses the training views to write `depth-calibration.json` and the matching PNGs in `free-space/`. Use the same evaluation split in both commands, or omit it in both to train on all registered views. Use the complete registered image set for this workflow. Frame subsampling or limiting frames changes which views belong to the evaluation split. To change the split, prepare a fresh copy. Brush defaults to RGB training on ordinary datasets and enables the three losses when it finds the calibration manifest in the dataset root (`--geometry-supervision auto`). `on` enables all three by default; `off` disables all three even if individual switches are true. In `auto` or `on`, an explicit individual switch overrides the default for that loss.
+
+Each loss can now be enabled or disabled independently, with a separate nonnegative finite weight for experiments. The default enabled weights and the 500-step warm-up plus 500-step ramp are unchanged:
+
+| Switch (`true` / `false`) | Weight option | Default weight | Required supervision files |
+| --- | --- | ---: | --- |
+| `--geometry-orientation` | `--geometry-orientation-weight` | 0.05 | `depths/`, `normals/` |
+| `--geometry-free-space` | `--geometry-free-space-weight` | 0.02 | `depth-calibration.json`, `free-space/` |
+| `--geometry-depth-distortion` | `--geometry-depth-distortion-weight` | 0.01 | None |
+
+For example, test lower orientation and depth-dispersion weights while keeping the free-space loss unchanged:
+
+```powershell
+brush-cli.exe .\dataset --geometry-supervision on `
+  --geometry-orientation true --geometry-orientation-weight 0.025 `
+  --geometry-free-space true --geometry-free-space-weight 0.02 `
+  --geometry-depth-distortion true --geometry-depth-distortion-weight 0.005
+```
+
+These are experimental overrides, not new defaults. A false switch or zero weight skips the corresponding loss and its additional rendering work. Setting a weight does not by itself enable a loss. To train with only depth dispersion on an ordinary undistorted PINHOLE dataset, use `--geometry-depth-distortion true`; no MoGe maps or calibration manifest are needed with the other losses left off in `auto`. Orientation alone does not require calibrated free-space files, and free-space alone does not require loading normals. Geometry training retains the existing PINHOLE camera requirement. The effective loss weights are reported in the INFO log after the final configuration is resolved. All six options also work in `args.txt`, with explicitly supplied CLI values taking precedence.
 
 ## Viewer
 Brush also works well as a splat viewer, including on the web. It can load .ply & .compressed.ply files. You can stream in data from a URL (for a web app, simply append `?url=`).
